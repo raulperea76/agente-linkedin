@@ -1,7 +1,7 @@
 crewai
 langchain-google-genai
 langchain-openai
-descord.py
+discord.py
 requests
 python-dotenv
 openai
