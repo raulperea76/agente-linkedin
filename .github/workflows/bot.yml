@@ -15,17 +15,17 @@ jobs:
         with:
           python-version: '3.11'
 
-     - name: Instalar librerías
-       run: pip install -r requirements.txt
+      - name: Instalar librerías
+        run: pip install -r requirements.txt
 
-     - name: Ejecutar Bot
-       env:
-         GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-         OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
-         DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
-         LINKEDIN_ACCESS_TOKEN: ${{ secrets.LINKEDIN_ACCESS_TOKEN }}
-         LINKEDIN_PERSON_URN: ${{ secrets.LINKEDIN_PERSON_URN }}
-       run: python mail.py
+      - name: Ejecutar Bot
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          DISCORD_BOT_TOKEN: ${{ secrets.DISCORD_BOT_TOKEN }}
+          LINKEDIN_ACCESS_TOKEN: ${{ secrets.LINKEDIN_ACCESS_TOKEN }}
+          LINKEDIN_PERSON_URN: ${{ secrets.LINKEDIN_PERSON_URN }}
+        run: python mail.py
 LINKEDIN_ACCESS_TOKEN: ${{ secrets.LINKEDIN_ACCESS_TOKEN }}
 LINKEDIN_PERSON_URN: ${{ secrets.LINKEDIN_PERSON_URN }}
 run: python main.py
