@@ -1,0 +1,7 @@
+crewai
+langchain-google-genai
+langchain-openai
+descord.py
+requests
+python-dotenv
+openai
