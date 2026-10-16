@@ -12,7 +12,14 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_openai import ChatOpenAI
 
 # ---------------------------------------------------------
-# 1. Servidor Flask para mantener activo el servicio Render
+# 1. Configurar el objeto Bot de Discord PRIMERO
+# ---------------------------------------------------------
+intents = discord.Intents.default()
+intents.message_content = True
+bot = commands.Bot(command_prefix="!", intents=intents)
+
+# ---------------------------------------------------------
+# 2. Servidor Flask para mantener activo el servicio Render
 # ---------------------------------------------------------
 app = Flask(__name__)
 
@@ -25,7 +32,7 @@ def run_flask():
     app.run(host="0.0.0.0", port=port)
 
     # ---------------------------------------------------------
-    # 2. Configurar Modelos y Clientes API
+    # 3. Configurar Modelos y Clientes API
     # ---------------------------------------------------------
     llm_gemini = ChatGoogleGenerativeAI(
         model="gemini-1.5-pro",
@@ -39,13 +46,8 @@ def run_flask():
 
     client_openai = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-    # Configuración del Bot de Discord
-    intents = discord.Intents.default()
-    intents.message_content = True
-    bot = commands.Bot(command_prefix="!", intents=intents)
-
 # ---------------------------------------------------------
-# 3. Funciones para subir imágenes a LinkedIn
+# 4. Funciones para subir imágenes a LinkedIn
 # ---------------------------------------------------------
 def registrar_y_subir_imagen_linkedin(image_bytes: bytes, token: str, author: str) -> str:
     """Registra la imagen en LinkedIn, sube el archivo binario y devuelve el URN del asset."""
@@ -122,7 +124,7 @@ def publicar_en_linkedin(texto_post: str, image_bytes_list: list = None) -> bool
     return res.status_code == 201
 
 # ---------------------------------------------------------
-# 4. Generador de Imagen con DALL-E 3
+# 5. Generador de Imagen con DALL-E 3
 # ---------------------------------------------------------
 def generar_imagen_dalle(prompt_idea: str) -> bytes:
     """Genera una imagen con DALL-E 3 a partir del contenido del post."""
@@ -137,7 +139,7 @@ def generar_imagen_dalle(prompt_idea: str) -> bytes:
     return requests.get(img_url).content
 
 # ---------------------------------------------------------
-# 5. Flujo Multiagente CrewAI
+# 6. Flujo Multiagente CrewAI
 # ---------------------------------------------------------
 def ejecutar_orquestacion_agentes(idea_usuario: str) -> str:
     redactor = Agent(
@@ -191,7 +193,7 @@ def ejecutar_orquestacion_agentes(idea_usuario: str) -> str:
     return str(crew.kickoff())
 
 # ---------------------------------------------------------
-# 6. Interfaz de Bot en Discord con Botones
+# 7. Interfaz de Bot en Discord con Botones
 # ---------------------------------------------------------
 class ComponentesAprobacion(discord.ui.View):
     def __init__(self, texto_post: str, image_bytes_list: list):
@@ -212,42 +214,42 @@ class ComponentesAprobacion(discord.ui.View):
     async def descartar(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_message("❌ **Borrador descartado.**")
 
-# ---------------------------------------------------------
-# 7. Comando principal del Bot (Sin sangría al inicio)
-# ---------------------------------------------------------
-@bot.command(name="post")
-async def comando_post(ctx, *, idea: str = ""):
-    await ctx.send("⚙️ *Orquestando agentes y procesando imagen...*")
+    # ---------------------------------------------------------
+    # 8. Comando principal del Bot
+    # ---------------------------------------------------------
+    @bot.command(name="post")
+    async def comando_post(ctx, *, idea: str = ""):
+        await ctx.send("⚙️ *Orquestando agentes y procesando imagen...*")
 
-    images_to_upload = []
+        images_to_upload = []
 
-    if ctx.message.attachments:
-        for attachment in ctx.message.attachments:
-            if any(attachment.filename.lower().endswith(ext) for ext in ['png', 'jpg', 'jpeg', 'webp']):
-                img_bytes = await attachment.read()
+        if ctx.message.attachments:
+            for attachment in ctx.message.attachments:
+                if any(attachment.filename.lower().endswith(ext) for ext in ['png', 'jpg', 'jpeg', 'webp']):
+                    img_bytes = await attachment.read()
                 images_to_upload.append(img_bytes)
-        await ctx.send("📷 *Imagen(es) recibida(s) desde tu galería.*")
+                await ctx.send("📷 *Imagen(es) recibida(s) desde tu galería.*")
 
-    else:
-        await ctx.send("🎨 *No adjuntaste imagen. Generando ilustración profesional con DALL-E 3...*")
+        else:
+            await ctx.send("🎨 *No adjuntaste imagen. Generando ilustración profesional con DALL-E 3...*")
         try:
             img_bytes = generar_imagen_dalle(idea)
             images_to_upload.append(img_bytes)
         except Exception as e:
             await ctx.send(f"⚠️ *No se pudo generar la imagen con DALL-E ({e}). Se procesará solo texto.*")
 
-    post_final = ejecutar_orquestacion_agentes(idea)
+        post_final = ejecutar_orquestacion_agentes(idea)
 
-    vista = ComponentesAprobacion(texto_post=post_final, image_bytes_list=images_to_upload)
+        vista = ComponentesAprobacion(texto_post=post_final, image_bytes_list=images_to_upload)
 
-    if images_to_upload:
-        file_preview = discord.File(fp=io.BytesIO(images_to_upload[0]), filename="preview.png")
-        await ctx.send(f"📝 **Propuesta de Post Final:**\n\n{post_final}", file=file_preview, view=vista)
-    else:
-        await ctx.send(f"📝 **Propuesta de Post Final:**\n\n{post_final}", view=vista)
+        if images_to_upload:
+            file_preview = discord.File(fp=io.BytesIO(images_to_upload[0]), filename="preview.png")
+            await ctx.send(f"📝 **Propuesta de Post Final:**\n\n{post_final}", file=file_preview, view=vista)
+        else:
+            await ctx.send(f"📝 **Propuesta de Post Final:**\n\n{post_final}", view=vista)
 
 # ---------------------------------------------------------
-# 8. Punto de entrada de la aplicación
+# 9. Iniciar Servidores
 # ---------------------------------------------------------
 if __name__ == "__main__":
     Thread(target=run_flask, daemon=True).start()
