@@ -183,10 +183,10 @@ class ComponentesAprobacion(discord.ui.View):
     async def descartar(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_message("❌ **Borrador descartado.**")
 
-        # Configuración del Bot
-        intents = discord.Intents.default()
-        intents.message_content = True
-        bot = commands.Bot(command_prefix="!", intents=intents)
+    # Configuración del Bot
+    intents = discord.Intents.default()
+    intents.message_content = True
+    bot = commands.Bot(command_prefix="!", intents=intents)
 
     @bot.command(name="post")
     async def comando_post(ctx, *, idea: str = ""):
