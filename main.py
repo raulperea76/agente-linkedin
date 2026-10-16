@@ -8,6 +8,9 @@ from crewai import Agent, Task, Crew, Process
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_openai import ChatOpenAI
 
+from threading import Thread
+from http.server import HTTPServer, BaseHTTPRequestHandler
+
 # 1. Configurar Modelos y Clientes API
 llm_gemini = ChatGoogleGenerativeAI(
     model="gemini-1.5-pro",
@@ -224,4 +227,19 @@ class ComponentesAprobacion(discord.ui.View):
         else:
             await ctx.send(f"📝 **Propuesta de Post Final:**\n\n{post_final}", view=vista)
 
+# Servidor HTTP ficticio para engañar al plan gratuito de Render
+class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Bot activo 24/7")
+
+    def run_http_server():
+        server = HTTPServer(('0.0.0.0', int(os.environ.get("PORT", 8080))), SimpleHTTPRequestHandler)
+        server.serve_forever()
+
+        # Iniciar el servidor web en un hilo paralelo
+        Thread(target=run_http_server, daemon=True).start()
+
+        # Iniciar el Bot de Discord
         bot.run(os.getenv("DISCORD_BOT_TOKEN"))
