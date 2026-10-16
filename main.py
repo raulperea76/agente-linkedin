@@ -31,7 +31,12 @@ def run_flask():
 
     client_openai = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
-# 2. Funciones para subir imágenes a la API de LinkedIn
+    # 2. Configurar el objeto Bot de Discord (AQUÍ DEBE IR ANTES DE USARLO)
+    intents = discord.Intents.default()
+    intents.message_content = True
+    bot = commands.Bot(command_prefix="!", intents=intents)
+
+# 3. Funciones para subir imágenes a la API de LinkedIn
 def registrar_y_subir_imagen_linkedin(image_bytes: bytes, token: str, author: str) -> str:
     """Registra la imagen en LinkedIn, sube el archivo binario y devuelve el URN del asset."""
     register_url = "https://api.linkedin.com/v2/assets?action=registerUpload"
@@ -106,7 +111,7 @@ def publicar_en_linkedin(texto_post: str, image_bytes_list: list = None) -> bool
     res = requests.post(url, headers=headers, json=payload)
     return res.status_code == 201
 
-# 3. Generador de Imagen con DALL-E 3
+# 4. Generador de Imagen con DALL-E 3
 def generar_imagen_dalle(prompt_idea: str) -> bytes:
     """Genera una imagen con DALL-E 3 a partir del contenido del post."""
     response = client_openai.images.generate(
@@ -119,7 +124,7 @@ def generar_imagen_dalle(prompt_idea: str) -> bytes:
     img_url = response.data[0].url
     return requests.get(img_url).content
 
-# 4. Flujo Multiagente CrewAI
+# 5. Flujo Multiagente CrewAI
 def ejecutar_orquestacion_agentes(idea_usuario: str) -> str:
     redactor = Agent(
         role='Redactor Ejecutivo de TI',
@@ -171,7 +176,7 @@ def ejecutar_orquestacion_agentes(idea_usuario: str) -> str:
 
     return str(crew.kickoff())
 
-# 5. Interfaz de Bot en Discord con Botones
+# 6. Interfaz de Bot en Discord con Botones
 class ComponentesAprobacion(discord.ui.View):
     def __init__(self, texto_post: str, image_bytes_list: list):
         super().__init__(timeout=None)
@@ -191,11 +196,7 @@ class ComponentesAprobacion(discord.ui.View):
     async def descartar(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_message("❌ **Borrador descartado.**")
 
-        # 6. Configuración e Inicio
-        intents = discord.Intents.default()
-        intents.message_content = True
-        bot = commands.Bot(command_prefix="!", intents=intents)
-
+    # 7. Comando principal del Bot
     @bot.command(name="post")
     async def comando_post(ctx, *, idea: str = ""):
         await ctx.send("⚙️ *Orquestando agentes y procesando imagen...*")
@@ -228,6 +229,5 @@ class ComponentesAprobacion(discord.ui.View):
             await ctx.send(f"📝 **Propuesta de Post Final:**\n\n{post_final}", view=vista)
 
 if __name__ == "__main__":
-    # Iniciar servidor Flask en un hilo independiente antes del bot
     Thread(target=run_flask, daemon=True).start()
     bot.run(os.getenv("DISCORD_BOT_TOKEN"))
