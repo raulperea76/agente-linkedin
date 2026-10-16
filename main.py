@@ -18,6 +18,9 @@ intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
+#LÍNEA AGREGADA / CORREGIDA
+client_openai= OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
 # ---------------------------------------------------------
 # 2. Servidor Flask para mantener activo el servicio Render
 # ---------------------------------------------------------
