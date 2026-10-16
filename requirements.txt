@@ -1,3 +1,4 @@
+creai
 crewai-tools
 langchain-google-genai
 langchain-openai
