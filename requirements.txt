@@ -1,4 +1,4 @@
-creai
+crewai
 crewai-tools
 langchain-google-genai
 langchain-openai
