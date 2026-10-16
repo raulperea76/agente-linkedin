@@ -6,3 +6,4 @@ discord.py
 requests
 python-dotenv
 openai
+flask
