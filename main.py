@@ -1,28 +1,35 @@
 import os
+import io
 import requests
 import discord
 from discord.ext import commands
 from openai import OpenAI
-
-from crewai import Agent, Task, Crew, Process
-from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_openai import ChatOpenAI
-
 from threading import Thread
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from flask import Flask
 
-# 1. Configurar Modelos y Clientes API
-llm_gemini = ChatGoogleGenerativeAI(
-    model="gemini-1.5-pro",
-    google_api_key=os.getenv("GEMINI_API_KEY")
-)
+# Servidor Flask para mantener activo el Web Service de Render
+app = Flask(__name__)
 
-llm_gpt = ChatOpenAI(
-    model="gpt-4o",
-    openai_api_key=os.getenv("OPENAI_API_KEY")
-)
+@app.route('/')
+def home():
+    return "Bot de LinkedIn Activo 24/7", 200
 
-client_openai = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+def run_flask():
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)
+
+    # 1. Configurar Modelos y Clientes API
+    llm_gemini = ChatGoogleGenerativeAI(
+        model="gemini-1.5-pro",
+        google_api_key=os.getenv("GEMINI_API_KEY")
+    )
+
+    llm_gpt = ChatOpenAI(
+        model="gpt-4o",
+        openai_api_key=os.getenv("OPENAI_API_KEY")
+    )
+
+    client_openai = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 # 2. Funciones para subir imágenes a la API de LinkedIn
 def registrar_y_subir_imagen_linkedin(image_bytes: bytes, token: str, author: str) -> str:
@@ -50,14 +57,13 @@ def registrar_y_subir_imagen_linkedin(image_bytes: bytes, token: str, author: st
     upload_url = reg_data["uploadMechanism"]["com.linkedin.digitalmedia.uploading.MediaUploadHttpRequest"]["uploadUrl"]
     asset_urn = reg_data["asset"]
 
-    # Subir el binario de la imagen
     upload_headers = {"Authorization": f"Bearer {token}"}
     up_res = requests.put(upload_url, headers=upload_headers, data=image_bytes)
 
     return asset_urn if up_res.status_code in [200, 201] else None
 
 
-def publicar_en_linkedin(texto_post: str, image_urls: list = None, image_bytes_list: list = None) -> bool:
+def publicar_en_linkedin(texto_post: str, image_bytes_list: list = None) -> bool:
     """Publica texto e imagen(es) en LinkedIn."""
     url = "https://api.linkedin.com/v2/ugcPosts"
     token = os.getenv("LINKEDIN_ACCESS_TOKEN")
@@ -71,7 +77,6 @@ def publicar_en_linkedin(texto_post: str, image_urls: list = None, image_bytes_l
 
     media_list = []
 
-    # Procesar imágenes adjuntas o descargadas
     if image_bytes_list:
         for img_bytes in image_bytes_list:
             asset_urn = registrar_y_subir_imagen_linkedin(img_bytes, token, author)
@@ -186,10 +191,10 @@ class ComponentesAprobacion(discord.ui.View):
     async def descartar(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_message("❌ **Borrador descartado.**")
 
-    # Configuración del Bot
-    intents = discord.Intents.default()
-    intents.message_content = True
-    bot = commands.Bot(command_prefix="!", intents=intents)
+        # 6. Configuración e Inicio
+        intents = discord.Intents.default()
+        intents.message_content = True
+        bot = commands.Bot(command_prefix="!", intents=intents)
 
     @bot.command(name="post")
     async def comando_post(ctx, *, idea: str = ""):
@@ -197,7 +202,6 @@ class ComponentesAprobacion(discord.ui.View):
 
         images_to_upload = []
 
-        # Opción A: El usuario adjuntó imagen(es) desde su galería
         if ctx.message.attachments:
             for attachment in ctx.message.attachments:
                 if any(attachment.filename.lower().endswith(ext) for ext in ['png', 'jpg', 'jpeg', 'webp']):
@@ -205,7 +209,6 @@ class ComponentesAprobacion(discord.ui.View):
                 images_to_upload.append(img_bytes)
                 await ctx.send("📷 *Imagen(es) recibida(s) desde tu galería.*")
 
-        # Opción B: No adjuntó imagen -> Generar automáticamente con DALL-E 3
         else:
             await ctx.send("🎨 *No adjuntaste imagen. Generando ilustración profesional con DALL-E 3...*")
         try:
@@ -214,32 +217,17 @@ class ComponentesAprobacion(discord.ui.View):
         except Exception as e:
             await ctx.send(f"⚠️ *No se pudo generar la imagen con DALL-E ({e}). Se procesará solo texto.*")
 
-        # Generación de Texto
         post_final = ejecutar_orquestacion_agentes(idea)
 
-        # Preparar vista de respuesta en Discord
         vista = ComponentesAprobacion(texto_post=post_final, image_bytes_list=images_to_upload)
 
-        # Enviar archivo a Discord para vista previa
         if images_to_upload:
-            file_preview = discord.File(fp=requests.adapters.io.BytesIO(images_to_upload[0]), filename="preview.png")
+            file_preview = discord.File(fp=io.BytesIO(images_to_upload[0]), filename="preview.png")
             await ctx.send(f"📝 **Propuesta de Post Final:**\n\n{post_final}", file=file_preview, view=vista)
         else:
             await ctx.send(f"📝 **Propuesta de Post Final:**\n\n{post_final}", view=vista)
 
-# Servidor HTTP ficticio para engañar al plan gratuito de Render
-class SimpleHTTPRequestHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.end_headers()
-        self.wfile.write(b"Bot activo 24/7")
-
-    def run_http_server():
-        server = HTTPServer(('0.0.0.0', int(os.environ.get("PORT", 8080))), SimpleHTTPRequestHandler)
-        server.serve_forever()
-
-        # Iniciar el servidor web en un hilo paralelo
-        Thread(target=run_http_server, daemon=True).start()
-
-        # Iniciar el Bot de Discord
-        bot.run(os.getenv("DISCORD_BOT_TOKEN"))
+if __name__ == "__main__":
+    # Iniciar servidor Flask en un hilo independiente antes del bot
+    Thread(target=run_flask, daemon=True).start()
+    bot.run(os.getenv("DISCORD_BOT_TOKEN"))
