@@ -55,7 +55,7 @@ class LinkedInBot(commands.Bot):
             rows = list_drafts("PENDING", limit=10000)
             for row in rows:
                 self.add_view(ApprovalView(row["id"]))
-                log.info("Vistas persistentes registradas: %s", len(rows))
+            log.info("Vistas persistentes registradas: %s", len(rows))
         except Exception:
             log.exception("No se pudieron registrar las vistas persistentes.")
             raise
