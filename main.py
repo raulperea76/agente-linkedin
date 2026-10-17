@@ -667,58 +667,58 @@ def ejecutar_agentes(idea: str) -> str:
                 await ctx.reply("No tienes autorización para usar este bot.")
             return
 
-        idea = idea.strip()
-        if not idea:
-            await ctx.reply("Uso: `!post tu idea para LinkedIn`")
-        return
+            idea = idea.strip()
+            if not idea:
+                await ctx.reply("Uso: `!post tu idea para LinkedIn`")
+                return
 
-        if len(idea) > MAX_IDEA_CHARS:
-            await ctx.reply(f"La idea supera el máximo de {MAX_IDEA_CHARS} caracteres.")
-        return
+            if len(idea) > MAX_IDEA_CHARS:
+                await ctx.reply(f"La idea supera el máximo de {MAX_IDEA_CHARS} caracteres.")
+                return
 
-        status_message = await ctx.send("⚙️ Generando el borrador con CrewAI...")
+            status_message = await ctx.send("⚙️ Generando el borrador con CrewAI...")
 
-        image_bytes = None
-        if ctx.message.attachments:
-            attachment = ctx.message.attachments[0]
+            image_bytes = None
+            if ctx.message.attachments:
+                attachment = ctx.message.attachments[0]
+                try:
+                    if attachment.size > MAX_IMAGE_BYTES:
+                        raise ValueError("La imagen supera el límite de 8 MiB.")
+                    image_bytes = validate_image(await attachment.read())
+                except Exception as exc:
+                    await status_message.edit(content=f"No se pudo usar la imagen: {exc}")
+                    return
+
+            loop = asyncio.get_running_loop()
             try:
-                if attachment.size > MAX_IMAGE_BYTES:
-                    raise ValueError("La imagen supera el límite de 8 MiB.")
-                image_bytes = validate_image(await attachment.read())
-            except Exception as exc:
-                await status_message.edit(content=f"No se pudo usar la imagen: {exc}")
-            return
-
-        loop = asyncio.get_running_loop()
-        try:
-            post_text = await asyncio.wait_for(
-                asyncio.shield(loop.run_in_executor(executor, ejecutar_agentes, idea)),
-                timeout=CREW_TIMEOUT + 15,
-            )
-        except asyncio.TimeoutError:
-            await status_message.edit(
-                content=(
-                "La generación tardó demasiado. El trabajo puede seguir en segundo plano; "
-                "espera y revisa los logs antes de volver a intentarlo."
-            )
-            )
-            return
-        except Exception:
-            log.exception("Falló la generación del post.")
-            await status_message.edit(
-                content="No se pudo generar el borrador. Revisa los logs privados."
-            )
-            return
-
-        if image_bytes is None:
-            try:
-                image_bytes = await asyncio.wait_for(
-                    asyncio.shield(loop.run_in_executor(executor, generar_imagen, idea)),
-                    timeout=25,
+                post_text = await asyncio.wait_for(
+                    asyncio.shield(loop.run_in_executor(executor, ejecutar_agentes, idea)),
+                    timeout=CREW_TIMEOUT + 15,
                 )
+            except asyncio.TimeoutError:
+                await status_message.edit(
+                    content=(
+                        "La generación tardó demasiado. El trabajo puede seguir en segundo plano; "
+                        "espera y revisa los logs antes de volver a intentarlo."
+                    )
+                )
+                return
             except Exception:
-                log.warning("No se pudo generar imagen; se continuará sin ella.", exc_info=True)
-                image_bytes = None
+                log.exception("Falló la generación del post.")
+                await status_message.edit(
+                    content="No se pudo generar el borrador. Revisa los logs privados."
+                )
+                return
+
+            if image_bytes is None:
+                try:
+                    image_bytes = await asyncio.wait_for(
+                        asyncio.shield(loop.run_in_executor(executor, generar_imagen, idea)),
+                        timeout=25,
+                    )
+                except Exception:
+                    log.warning("No se pudo generar imagen; se continuará sin ella.", exc_info=True)
+                    image_bytes = None
 
             draft_id = uuid.uuid4().hex
             try:
