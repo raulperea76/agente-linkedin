@@ -582,17 +582,17 @@ def ejecutar_agentes(idea: str) -> str:
                 executor, publicar_en_linkedin, draft["text"], image
             )
 
-        change_status(self.draft_id, "PUBLISHED", post_id=post_id)
-        self.disable_all_items()
+            change_status(self.draft_id, "PUBLISHED", post_id=post_id)
+            self.disable_all_items()
 
-        await interaction.followup.send(
-            f"🚀 **¡Publicado exitosamente en LinkedIn!**\nID: `{post_id}`",
-            ephemeral=False,
-        )
-        try:
-            await interaction.message.edit(view=self)
-        except Exception:
-            pass
+            await interaction.followup.send(
+                f"🚀 **¡Publicado exitosamente en LinkedIn!**\nID: `{post_id}`",
+                ephemeral=False,
+            )
+            try:
+                await interaction.message.edit(view=self)
+            except Exception:
+                pass
 
         except Exception as e:
             change_status(self.draft_id, "PENDING", error=str(e))
