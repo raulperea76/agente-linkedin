@@ -27,16 +27,19 @@ def run_flask():
     app.run(host="0.0.0.0", port=port)
 
 # ---------------------------------------------------------
-# 2. Generador de Imagen Automático
+# 2. Generador de Imagen con Timeout Rápido (8s)
 # ---------------------------------------------------------
 def generar_imagen_ejecutiva(prompt_idea: str) -> bytes:
-    clean_prompt = requests.utils.quote(prompt_idea[:100])
+    print(f"[INFO] Solicitando imagen para: {prompt_idea[:50]}...")
+    clean_prompt = requests.utils.quote(prompt_idea[:80])
     image_url = f"https://pollinations.ai/p/Minimalist%20modern%20executive%20illustration%20for%20LinkedIn%20about%20{clean_prompt}?width=1024&height=1024&seed=42"
 
-    response = requests.get(image_url, timeout=30)
+    # Timeout de 8 segundos para evitar bloqueos
+    response = requests.get(image_url, timeout=8)
     if response.status_code == 200:
-        return response.content
-    raise Exception("No se pudo obtener la imagen.")
+        print("[INFO] Imagen obtenida exitosamente.")
+    return response.content
+    raise Exception(f"HTTP {response.status_code}")
 
 # ---------------------------------------------------------
 # 3. Funciones para publicar en LinkedIn
@@ -59,6 +62,7 @@ def registrar_y_subir_imagen_linkedin(image_bytes: bytes, token: str, author: st
 
     reg_res = requests.post(register_url, headers=headers, json=register_payload)
     if reg_res.status_code != 200:
+        print(f"[ERROR LinkedIn Register] {reg_res.text}")
         return None
 
     reg_data = reg_res.json()["value"]
@@ -111,13 +115,15 @@ def publicar_en_linkedin(texto_post: str, image_bytes_list: list = None) -> bool
     }
 
     res = requests.post(url, headers=headers, json=payload)
+    if res.status_code != 201:
+        print(f"[ERROR LinkedIn Publish] {res.text}")
     return res.status_code == 201
 
 # ---------------------------------------------------------
 # 4. Flujo Multiagente CrewAI
 # ---------------------------------------------------------
 def ejecutar_orquestacion_agentes(idea_usuario: str) -> str:
-    # Usamos identificadores compatibles con LiteLLM en CrewAI
+    print("[INFO] Iniciando CrewAI con Gemini y GPT-4o...")
     llm_gemini_name = "gemini/gemini-1.5-pro"
     llm_gpt_name = "gpt-4o"
 
@@ -170,6 +176,7 @@ def ejecutar_orquestacion_agentes(idea_usuario: str) -> str:
     )
 
     resultado = crew.kickoff()
+    print("[INFO] Orquestación finalizada exitosamente.")
     return str(getattr(resultado, 'raw', resultado))
 
 # ---------------------------------------------------------
@@ -189,7 +196,7 @@ class ComponentesAprobacion(discord.ui.View):
         if exito:
             await interaction.followup.send("✅ **¡Publicado con éxito en LinkedIn con la imagen!**")
         else:
-            await interaction.followup.send("❌ **Error al publicar en LinkedIn.** Revisa tus credenciales o token de acceso.")
+            await interaction.followup.send("❌ **Error al publicar en LinkedIn.** Revisa los logs de Render para ver la razón exacta.")
 
     @discord.ui.button(label="Descartar", style=discord.ButtonStyle.red, emoji="🗑️")
     async def descartar(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -204,6 +211,7 @@ class ComponentesAprobacion(discord.ui.View):
 
         images_to_upload = []
 
+        # A) Foto adjunta desde galería
         if ctx.message.attachments:
             for attachment in ctx.message.attachments:
                 if any(attachment.filename.lower().endswith(ext) for ext in ['png', 'jpg', 'jpeg', 'webp']):
@@ -211,6 +219,7 @@ class ComponentesAprobacion(discord.ui.View):
                     images_to_upload.append(img_bytes)
                     await ctx.send("📷 *Imagen(es) recibida(s) desde tu galería.*")
 
+                # B) Generación automática de imagen
                 else:
                     await ctx.send("🎨 *No adjuntaste imagen. Generando ilustración profesional...*")
                 try:
@@ -218,8 +227,10 @@ class ComponentesAprobacion(discord.ui.View):
                     img_bytes = await loop.run_in_executor(None, generar_imagen_ejecutiva, idea)
                     images_to_upload.append(img_bytes)
                 except Exception as e:
-                    await ctx.send(f"⚠️ *No se pudo generar la imagen ({e}). Se procesará solo texto.*")
+                    print(f"[WARN] Error/Timeout generando imagen: {e}")
+                    await ctx.send("⚠️ *La generación de imagen tardó demasiado. Se procesará solo texto.*")
 
+                # C) Ejecutar CrewAI
                 try:
                     loop = asyncio.get_event_loop()
                     post_final = await loop.run_in_executor(None, ejecutar_orquestacion_agentes, idea)
@@ -231,7 +242,9 @@ class ComponentesAprobacion(discord.ui.View):
                         await ctx.send(f"📝 **Propuesta de Post Final:**\n\n{post_final}", file=file_preview, view=vista)
                     else:
                         await ctx.send(f"📝 **Propuesta de Post Final:**\n\n{post_final}", view=vista)
+
                 except Exception as err:
+                    print(f"[ERROR CrewAI] {err}")
                     await ctx.send(f"❌ **Error durante la orquestación de IA:** `{err}`")
 
 # ---------------------------------------------------------
