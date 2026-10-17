@@ -1,5 +1,6 @@
 import os
 import io
+import asyncio
 import requests
 import discord
 from discord.ext import commands
@@ -41,17 +42,16 @@ def run_flask():
     )
 
 # ---------------------------------------------------------
-# 3. Generador de Imagen Automático (Sin restricciones de API Key)
+# 3. Generador de Imagen Automático
 # ---------------------------------------------------------
 def generar_imagen_ejecutiva(prompt_idea: str) -> bytes:
-    """Genera una ilustración ejecutiva en HD basada en la idea del post."""
     clean_prompt = requests.utils.quote(prompt_idea[:100])
     image_url = f"https://pollinations.ai/p/Minimalist%20modern%20executive%20illustration%20for%20LinkedIn%20about%20{clean_prompt}?width=1024&height=1024&seed=42"
 
     response = requests.get(image_url, timeout=30)
     if response.status_code == 200:
         return response.content
-    raise Exception("No se pudo obtener la imagen del generador público.")
+    raise Exception("No se pudo obtener la imagen.")
 
 # ---------------------------------------------------------
 # 4. Funciones para publicar en LinkedIn
@@ -194,7 +194,8 @@ class ComponentesAprobacion(discord.ui.View):
     @discord.ui.button(label="Aprobar y Publicar", style=discord.ButtonStyle.green, emoji="🚀")
     async def publicar(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
-        exito = publicar_en_linkedin(self.texto_post, image_bytes_list=self.image_bytes_list)
+        loop = asyncio.get_event_loop()
+        exito = await loop.run_in_executor(None, publicar_en_linkedin, self.texto_post, self.image_bytes_list)
         if exito:
             await interaction.followup.send("✅ **¡Publicado con éxito en LinkedIn con la imagen!**")
         else:
@@ -223,12 +224,15 @@ class ComponentesAprobacion(discord.ui.View):
         else:
             await ctx.send("🎨 *No adjuntaste imagen. Generando ilustración profesional...*")
         try:
-            img_bytes = generar_imagen_ejecutiva(idea)
+            loop = asyncio.get_event_loop()
+            img_bytes = await loop.run_in_executor(None, generar_imagen_ejecutiva, idea)
             images_to_upload.append(img_bytes)
         except Exception as e:
             await ctx.send(f"⚠️ *No se pudo generar la imagen ({e}). Se procesará solo texto.*")
 
-        post_final = ejecutar_orquestacion_agentes(idea)
+        # Ejecutar la orquestación en un ejecutor asíncrono para evitar bloqueos
+        loop = asyncio.get_event_loop()
+        post_final = await loop.run_in_executor(None, ejecutar_orquestacion_agentes, idea)
 
         vista = ComponentesAprobacion(texto_post=post_final, image_bytes_list=images_to_upload)
 
