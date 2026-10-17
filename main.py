@@ -51,7 +51,6 @@ intents.message_content = True
 
 class LinkedInBot(commands.Bot):
     async def setup_hook(self):
-        # Registrar botones persistentes de borradores pendientes.
         try:
             rows = list_drafts("PENDING", limit=10000)
             for row in rows:
@@ -60,6 +59,9 @@ class LinkedInBot(commands.Bot):
         except Exception:
             log.exception("No se pudieron registrar las vistas persistentes.")
             raise
+
+
+bot = LinkedInBot(command_prefix="!", intents=intents)
 
 
 def env_required(name: str) -> str:
@@ -154,7 +156,6 @@ updated_at TEXT DEFAULT CURRENT_TIMESTAMP
 CREATE INDEX IF NOT EXISTS idx_drafts_status_created
 ON drafts(status, created_at)
 """)
-        # No se reintenta una publicación interrumpida: LinkedIn pudo aceptarla.
         conn.execute("""
 UPDATE drafts
 SET status = 'UNKNOWN',
@@ -180,7 +181,6 @@ def get_draft(draft_id: str):
 
 
 def claim_draft(draft_id: str) -> bool:
-    # Una sola operación puede cambiar PENDING -> PUBLISHING.
     with db() as conn:
         result = conn.execute("""
 UPDATE drafts
@@ -249,7 +249,6 @@ def home():
 
 @app.get("/live")
 def live():
-    # Indica que el proceso web responde, no que todas las dependencias estén listas.
     return jsonify({"status": "alive"}), 200
 
 
@@ -357,7 +356,6 @@ def subir_imagen_linkedin(image_bytes: bytes) -> str:
     except (ValueError, KeyError, TypeError) as exc:
         raise RuntimeError("Respuesta inesperada al inicializar la imagen.") from exc
 
-    # Evita enviar el archivo a un host inesperado si la respuesta fuera manipulada.
     parsed = urlparse(upload_url)
     if parsed.scheme != "https" or not (
         parsed.hostname == "linkedin.com"
@@ -408,7 +406,6 @@ def publicar_en_linkedin(texto: str, image_bytes: bytes | None = None) -> str:
         }
         }
 
-    # No se reintenta esta solicitud: un timeout puede ocurrir después de crear el post.
     response = requests.post(
         LINKEDIN_POSTS_URL,
         headers=linkedin_headers(),
@@ -423,7 +420,6 @@ def publicar_en_linkedin(texto: str, image_bytes: bytes | None = None) -> str:
 
     post_id = response.headers.get("x-restli-id")
     if not post_id:
-        # HTTP 201 sugiere creación, pero sin ID no damos por confirmada la operación.
         raise RuntimeError(
             "LinkedIn respondió 201 pero no devolvió x-restli-id; verificar manualmente."
         )
@@ -530,146 +526,158 @@ def ejecutar_agentes(idea: str) -> str:
     return text
 
 
-# =========================================================
-# 7. VISTAS PERSISTENTES Y APROBACIÓN
-# =========================================================
+    # =========================================================
+    # 7. VISTAS PERSISTENTES Y APROBACIÓN
+    # =========================================================
 
-class ApprovalView(discord.ui.View):
-    def __init__(self, draft_id: str):
-        super().__init__(timeout=None)
-        self.draft_id = draft_id
+    class ApprovalView(discord.ui.View):
+        def __init__(self, draft_id: str):
+            super().__init__(timeout=None)
+            self.draft_id = draft_id
 
-        approve = discord.ui.Button(
-            label="Aprobar y publicar",
-            style=discord.ButtonStyle.success,
-            emoji="🚀",
-            custom_id=f"linkedin:approve:{draft_id}",
-        )
-        approve.callback = self.approve
-        self.add_item(approve)
-
-        discard = discord.ui.Button(
-            label="Descartar",
-            style=discord.ButtonStyle.danger,
-            emoji="🗑️",
-            custom_id=f"linkedin:discard:{draft_id}",
-        )
-        discard.callback = self.discard
-        self.add_item(discard)
-
-async def approve(self, interaction: discord.Interaction):
-    # 1. Validación previa y reclamación atómica del borrador
-    draft = get_draft(self.draft_id)
-    if not draft:
-        await interaction.followup.send("No se encontró el borrador.", ephemeral=True)
-        return
-
-    if not claim_draft(self.draft_id):
-        current = get_draft(self.draft_id)
-        state = current["status"] if current else "no disponible"
-        await interaction.followup.send(
-            f"El borrador ya fue procesado. Estado: {state}.",
-            ephemeral=True,
-        )
-    return
-
-    # 2. Ejecución de la publicación
-    try:
-        image = bytes(draft["image"]) if draft["image"] else None
-        loop = asyncio.get_running_loop()
-
-        post_id = await loop.run_in_executor(
-            executor, publicar_en_linkedin, draft["text"], image
-        )
-
-        # Notificación de éxito o actualización de UI según tu lógica
-        await interaction.followup.send(
-            f"🚀 **¡Publicado exitosamente en LinkedIn!**\nID: `{post_id}`",
-            ephemeral=False
-        )
-
-    except Exception as e:
-        await interaction.followup.send(
-            f"❌ Error al publicar en LinkedIn: `{str(e)}`",
-            ephemeral=True
-        )
-    async def discard(self, interaction: discord.Interaction):
-        if not is_authorized(interaction.user.id):
-            await interaction.response.send_message(
-                "No tienes autorización para descartar.", ephemeral=True
+            approve = discord.ui.Button(
+                label="Aprobar y publicar",
+                style=discord.ButtonStyle.success,
+                emoji="🚀",
+                custom_id=f"linkedin:approve:{draft_id}",
             )
+            approve.callback = self.approve
+            self.add_item(approve)
+
+            discard = discord.ui.Button(
+                label="Descartar",
+                style=discord.ButtonStyle.danger,
+                emoji="🗑️",
+                custom_id=f"linkedin:discard:{draft_id}",
+            )
+            discard.callback = self.discard
+            self.add_item(discard)
+
+        async def approve(self, interaction: discord.Interaction):
+            await interaction.response.defer(ephemeral=True)
+
+            if not is_authorized(interaction.user.id):
+                await interaction.followup.send("No tienes autorización.", ephemeral=True)
+            return
+
+        draft = get_draft(self.draft_id)
+        if not draft:
+            await interaction.followup.send("No se encontró el borrador.", ephemeral=True)
         return
+
+        if not claim_draft(self.draft_id):
+            current = get_draft(self.draft_id)
+            state = current["status"] if current else "no disponible"
+            await interaction.followup.send(
+                f"El borrador ya fue procesado. Estado: {state}.",
+                ephemeral=True,
+            )
+            return
 
         try:
-            if not discard_draft(self.draft_id):
-                draft = get_draft(self.draft_id)
-                state = draft["status"] if draft else "no disponible"
-                await interaction.response.send_message(
-                    f"No se pudo descartar. Estado actual: {state}.",
-                    ephemeral=True,
-                )
-                return
+            image = bytes(draft["image"]) if draft["image"] else None
+            loop = asyncio.get_running_loop()
 
-            self.disable_all_items()
-            await interaction.response.edit_message(
-                content="Borrador descartado.", view=self
+            post_id = await loop.run_in_executor(
+                executor, publicar_en_linkedin, draft["text"], image
             )
+
+        change_status(self.draft_id, "PUBLISHED", post_id=post_id)
+        self.disable_all_items()
+
+        await interaction.followup.send(
+            f"🚀 **¡Publicado exitosamente en LinkedIn!**\nID: `{post_id}`",
+            ephemeral=False,
+        )
+        try:
+            await interaction.message.edit(view=self)
         except Exception:
-            log.exception("No se pudo descartar el borrador.")
-        if not interaction.response.is_done():
-            await interaction.response.send_message(
-                "No se pudo actualizar el borrador. Intenta de nuevo o revisa los logs.",
+            pass
+
+        except Exception as e:
+            change_status(self.draft_id, "PENDING", error=str(e))
+            log.exception("Falló la publicación en LinkedIn.")
+            await interaction.followup.send(
+                f"❌ Error al publicar en LinkedIn: `{str(e)}`",
                 ephemeral=True,
             )
 
-    def disable_all_items(self):
-        for item in self.children:
-            item.disabled = True
+        async def discard(self, interaction: discord.Interaction):
+            if not is_authorized(interaction.user.id):
+                await interaction.response.send_message(
+                    "No tienes autorización para descartar.", ephemeral=True
+                )
+            return
+
+            try:
+                if not discard_draft(self.draft_id):
+                    draft = get_draft(self.draft_id)
+                    state = draft["status"] if draft else "no disponible"
+                    await interaction.response.send_message(
+                        f"No se pudo descartar. Estado actual: {state}.",
+                        ephemeral=True,
+                    )
+                    return
+
+                self.disable_all_items()
+                await interaction.response.edit_message(
+                    content="Borrador descartado.", view=self
+                )
+            except Exception:
+                log.exception("No se pudo descartar el borrador.")
+            if not interaction.response.is_done():
+                await interaction.response.send_message(
+                    "Error al descartar el borrador.", ephemeral=True
+                )
+
+        def disable_all_items(self):
+            for item in self.children:
+                item.disabled = True
 
 
-    def render_draft_message(draft) -> str:
-        preview = draft["text"]
-        if len(preview) > PREVIEW_CHARS:
-            preview = preview[:PREVIEW_CHARS] + "\n\n[Vista previa recortada.]"
-        return (
-            f"**Borrador para revisar**\n\n{preview}\n\n"
-            f"ID del borrador: `{draft['id']}`"
-        )
+        def render_draft_message(draft) -> str:
+            preview = draft["text"]
+            if len(preview) > PREVIEW_CHARS:
+                preview = preview[:PREVIEW_CHARS] + "\n\n[Vista previa recortada.]"
+            return (
+                f"**Borrador para revisar**\n\n{preview}\n\n"
+                f"ID del borrador: `{draft['id']}`"
+            )
 
 
-    async def send_draft_preview(ctx, draft) -> None:
-        view = ApprovalView(draft["id"])
-        content = render_draft_message(draft)
+        async def send_draft_preview(ctx, draft) -> None:
+            view = ApprovalView(draft["id"])
+            content = render_draft_message(draft)
 
-        if draft["image"]:
-            file = discord.File(io.BytesIO(bytes(draft["image"])), filename="preview.png")
-            await ctx.send(content=content, file=file, view=view)
-        else:
-            await ctx.send(content=content, view=view)
+            if draft["image"]:
+                file = discord.File(io.BytesIO(bytes(draft["image"])), filename="preview.png")
+                await ctx.send(content=content, file=file, view=view)
+            else:
+                await ctx.send(content=content, view=view)
 
 
-    # =========================================================
-    # 8. COMANDOS DISCORD
-    # =========================================================
-    bot = LinkedInBot(command_prefix="!", intents=intents)
-    @bot.command(name="post")
-    @commands.guild_only()
-    async def comando_post(ctx: commands.Context, *, idea: str = ""):
-        if not is_authorized(ctx.author.id):
-            await ctx.reply("No tienes autorización para usar este bot.")
+        # =========================================================
+        # 8. COMANDOS DISCORD
+        # =========================================================
+
+        @bot.command(name="post")
+        @commands.guild_only()
+        async def comando_post(ctx: commands.Context, *, idea: str = ""):
+            if not is_authorized(ctx.author.id):
+                await ctx.reply("No tienes autorización para usar este bot.")
             return
 
         idea = idea.strip()
         if not idea:
             await ctx.reply("Uso: `!post tu idea para LinkedIn`")
         return
+
         if len(idea) > MAX_IDEA_CHARS:
             await ctx.reply(f"La idea supera el máximo de {MAX_IDEA_CHARS} caracteres.")
-            return
+        return
 
         status_message = await ctx.send("⚙️ Generando el borrador con CrewAI...")
 
-        # Si el usuario adjunta imagen, se valida antes de gastar recursos de IA.
         image_bytes = None
         if ctx.message.attachments:
             attachment = ctx.message.attachments[0]
@@ -702,7 +710,6 @@ async def approve(self, interaction: discord.Interaction):
             )
             return
 
-        # La imagen automática se genera después del texto para evitar gasto innecesario.
         if image_bytes is None:
             try:
                 image_bytes = await asyncio.wait_for(
@@ -737,22 +744,22 @@ async def approve(self, interaction: discord.Interaction):
                 )
 
 
-    @bot.command(name="pendientes")
-    @commands.guild_only()
-    async def comando_pendientes(ctx: commands.Context):
-        if not is_authorized(ctx.author.id):
-            await ctx.reply("No tienes autorización para consultar borradores.")
-        return
-
-        try:
-            drafts = list_drafts("PENDING", limit=15)
-        except Exception:
-            log.exception("No se pudieron consultar borradores pendientes.")
-            await ctx.reply("No se pudo consultar la base de datos.")
+        @bot.command(name="pendientes")
+        @commands.guild_only()
+        async def comando_pendientes(ctx: commands.Context):
+            if not is_authorized(ctx.author.id):
+                await ctx.reply("No tienes autorización para consultar borradores.")
             return
 
-        if not drafts:
-            await ctx.reply("No hay borradores pendientes.")
+            try:
+                drafts = list_drafts("PENDING", limit=15)
+            except Exception:
+                log.exception("No se pudieron consultar borradores pendientes.")
+                await ctx.reply("No se pudo consultar la base de datos.")
+                return
+
+            if not drafts:
+                await ctx.reply("No hay borradores pendientes.")
             return
 
         lines = ["**Borradores pendientes**"]
@@ -761,57 +768,59 @@ async def approve(self, interaction: discord.Interaction):
             if len(short_text) > 100:
                 short_text = short_text[:100] + "…"
                 lines.append(f"• `{draft['id']}` — {short_text}")
-                lines.append("Usa `!recuperar ID` para volver a mostrar uno.")
-                await ctx.reply("\n".join(lines))
+
+            lines.append("\nUsa `!recuperar ID` para volver a mostrar uno.")
+            await ctx.reply("\n".join(lines))
 
 
-    @bot.command(name="recuperar")
-    @commands.guild_only()
-    async def comando_recuperar(ctx: commands.Context, draft_id: str = ""):
-        if not is_authorized(ctx.author.id):
-            await ctx.reply("No tienes autorización para recuperar borradores.")
-        return
-        if not re.fullmatch(r"[0-9a-f]{32}", draft_id or ""):
-            await ctx.reply("Uso: `!recuperar ID_DEL_BORRADOR`")
-        return
-
-        try:
-            draft = get_draft(draft_id)
-        except Exception:
-            log.exception("No se pudo recuperar el borrador.")
-            await ctx.reply("No se pudo consultar la base de datos.")
+        @bot.command(name="recuperar")
+        @commands.guild_only()
+        async def comando_recuperar(ctx: commands.Context, draft_id: str = ""):
+            if not is_authorized(ctx.author.id):
+                await ctx.reply("No tienes autorización para recuperar borradores.")
+            return
+            if not re.fullmatch(r"[0-9a-f]{32}", draft_id or ""):
+                await ctx.reply("Uso: `!recuperar ID_DEL_BORRADOR`")
             return
 
-        if not draft:
-            await ctx.reply("No se encontró el borrador.")
-        return
-        if draft["status"] != "PENDING":
-            await ctx.reply(f"El borrador no está pendiente. Estado: `{draft['status']}`.")
-        return
+            try:
+                draft = get_draft(draft_id)
+            except Exception:
+                log.exception("No se pudo recuperar el borrador.")
+                await ctx.reply("No se pudo consultar la base de datos.")
+                return
 
-        try:
-            await send_draft_preview(ctx, draft)
-        except discord.HTTPException:
-            log.exception("No se pudo volver a mostrar el borrador.")
-            await ctx.reply("Discord no pudo mostrar el borrador; inténtalo de nuevo más tarde.")
-
-
-    @bot.command(name="estado")
-    @commands.guild_only()
-    async def comando_estado(ctx: commands.Context, draft_id: str = ""):
-        if not is_authorized(ctx.author.id):
-            await ctx.reply("No tienes autorización para consultar estados.")
-        return
-        if not re.fullmatch(r"[0-9a-f]{32}", draft_id or ""):
-            await ctx.reply("Uso: `!estado ID_DEL_BORRADOR`")
-        return
-
-        try:
-            draft = get_draft(draft_id)
-        except Exception:
-            log.exception("No se pudo consultar el estado.")
-            await ctx.reply("No se pudo consultar la base de datos.")
+            if not draft:
+                await ctx.reply("No se encontró el borrador.")
             return
+            if draft["status"] != "PENDING":
+                await ctx.reply(f"El borrador no está pendiente. Estado: `{draft['status']}`.")
+            return
+
+            try:
+                await send_draft_preview(ctx, draft)
+            except discord.HTTPException:
+                log.exception("No se pudo volver a mostrar el borrador.")
+                await ctx.reply("Discord no pudo mostrar el borrador; inténtalo de nuevo más tarde.")
+
+
+        @bot.command(name="estado")
+        @commands.guild_only()
+        async def comando_estado(ctx: commands.Context, draft_id: str = ""):
+            if not is_authorized(ctx.author.id):
+                await ctx.reply("No tienes autorización para consultar estados.")
+            return
+            if not re.fullmatch(r"[0-9a-f]{32}", draft_id or ""):
+                await ctx.reply("Uso: `!estado ID_DEL_BORRADOR`")
+            return
+
+            try:
+                draft = get_draft(draft_id)
+            except Exception:
+                log.exception("No se pudo consultar el estado.")
+                await ctx.reply("No se pudo consultar la base de datos.")
+                return
+
             if not draft:
                 await ctx.reply("No se encontró el borrador.")
             return
@@ -827,79 +836,70 @@ async def approve(self, interaction: discord.Interaction):
             await ctx.reply(text)
 
 
-    @bot.command(name="resolver")
-    @commands.guild_only()
-    async def comando_resolver(
-        ctx: commands.Context,
-        draft_id: str = "",
-        resultado: str = "",
-        post_id: str = "",
-    ):
-        """
-Uso:
-!resolver ID publicado ID_LINKEDIN
-!resolver ID no_publicado
-
-Solo usar después de verificar manualmente el estado en LinkedIn.
-"""
-        if not is_authorized(ctx.author.id):
-            await ctx.reply("No tienes autorización para resolver publicaciones.")
-        return
-        if not re.fullmatch(r"[0-9a-f]{32}", draft_id or ""):
-            await ctx.reply(
-                "Uso: `!resolver ID publicado ID_LINKEDIN` o "
-                "`!resolver ID no_publicado`"
-            )
-        return
-
-        try:
-            draft = get_draft(draft_id)
-            if not draft:
-                await ctx.reply("No se encontró el borrador.")
+        @bot.command(name="resolver")
+        @commands.guild_only()
+        async def comando_resolver(
+            ctx: commands.Context,
+            draft_id: str = "",
+            resultado: str = "",
+            post_id: str = "",
+        ):
+            if not is_authorized(ctx.author.id):
+                await ctx.reply("No tienes autorización para resolver publicaciones.")
             return
-            if draft["status"] != "UNKNOWN":
+            if not re.fullmatch(r"[0-9a-f]{32}", draft_id or ""):
                 await ctx.reply(
-                    f"Solo se pueden resolver borradores `UNKNOWN`. Estado actual: `{draft['status']}`."
+                    "Uso: `!resolver ID publicado ID_LINKEDIN` o `!resolver ID no_publicado`"
                 )
             return
 
-            if resultado == "publicado":
-                if not post_id.strip():
+            try:
+                draft = get_draft(draft_id)
+                if not draft:
+                    await ctx.reply("No se encontró el borrador.")
+                return
+                if draft["status"] != "UNKNOWN":
                     await ctx.reply(
-                        "Incluye el ID de LinkedIn: `!resolver ID publicado ID_LINKEDIN`"
+                        f"Solo se pueden resolver borradores `UNKNOWN`. Estado actual: `{draft['status']}`."
                     )
                 return
-                change_status(draft_id, "PUBLISHED", post_id=post_id.strip(),
-                    error="Resuelto manualmente tras verificar LinkedIn.")
-                await ctx.reply("Estado actualizado a `PUBLISHED`.")
-            elif resultado == "no_publicado":
-                # Devuelve a PENDING solo por decisión explícita del operador.
-                with db() as conn:
-                    result = conn.execute("""
+
+                if resultado == "publicado":
+                    if not post_id.strip():
+                        await ctx.reply(
+                            "Incluye el ID de LinkedIn: `!resolver ID publicado ID_LINKEDIN`"
+                        )
+                    return
+                    change_status(
+                        draft_id,
+                        "PUBLISHED",
+                        post_id=post_id.strip(),
+                        error="Resuelto manualmente tras verificar LinkedIn.",
+                    )
+                    await ctx.reply("Estado actualizado a `PUBLISHED`.")
+                elif resultado == "no_publicado":
+                    with db() as conn:
+                        result = conn.execute("""
 UPDATE drafts
 SET status = 'PENDING',
 error = 'Operador confirmó manualmente que no se publicó',
 updated_at = CURRENT_TIMESTAMP
 WHERE id = ? AND status = 'UNKNOWN'
 """, (draft_id,))
-                    if result.rowcount != 1:
-                        await ctx.reply("No se pudo cambiar el estado; vuelve a consultarlo.")
-                    return
-                    await ctx.reply(
-                        "Estado actualizado a `PENDING`. Verifica de nuevo antes de aprobar."
-                    )
-            else:
-                await ctx.reply(
-                    "Resultado inválido. Usa `publicado` o `no_publicado`."
-                )
-        except Exception:
-            log.exception("No se pudo resolver el borrador.")
-            await ctx.reply("No se pudo actualizar el estado. Revisa los logs.")
+                        if result.rowcount != 1:
+                            await ctx.reply("No se pudo cambiar el estado; vuelve a consultarlo.")
+                        return
+                        await ctx.reply("Estado actualizado a `PENDING`.")
+                else:
+                    await ctx.reply("Resultado inválido. Usa `publicado` o `no_publicado`.")
+            except Exception:
+                log.exception("No se pudo resolver el borrador.")
+                await ctx.reply("No se pudo actualizar el estado. Revisa los logs.")
 
 
-    @bot.event
-    async def on_ready():
-        log.info("Bot conectado como %s", bot.user)
+        @bot.event
+        async def on_ready():
+            log.info("Bot conectado como %s", bot.user)
 
 
 # =========================================================
