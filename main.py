@@ -12,7 +12,20 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_openai import ChatOpenAI
 
 # ---------------------------------------------------------
-# 1. Configurar Bot de Discord y Servidor Flask
+# 1. Configurar Modelos de IA (PRIMERO)
+# ---------------------------------------------------------
+llm_gemini = ChatGoogleGenerativeAI(
+    model="gemini-1.5-pro",
+    google_api_key=os.getenv("GEMINI_API_KEY")
+)
+
+llm_gpt = ChatOpenAI(
+    model="gpt-4o",
+    openai_api_key=os.getenv("OPENAI_API_KEY")
+)
+
+# ---------------------------------------------------------
+# 2. Configurar Bot de Discord y Servidor Flask
 # ---------------------------------------------------------
 intents = discord.Intents.default()
 intents.message_content = True
@@ -27,19 +40,6 @@ def home():
 def run_flask():
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
-
-    # ---------------------------------------------------------
-    # 2. Configurar Modelos de IA (Gemini + ChatGPT)
-    # ---------------------------------------------------------
-    llm_gemini = ChatGoogleGenerativeAI(
-        model="gemini-1.5-pro",
-        google_api_key=os.getenv("GEMINI_API_KEY")
-    )
-
-    llm_gpt = ChatOpenAI(
-        model="gpt-4o",
-        openai_api_key=os.getenv("OPENAI_API_KEY")
-    )
 
 # ---------------------------------------------------------
 # 3. Generador de Imagen Automático
@@ -230,7 +230,6 @@ class ComponentesAprobacion(discord.ui.View):
         except Exception as e:
             await ctx.send(f"⚠️ *No se pudo generar la imagen ({e}). Se procesará solo texto.*")
 
-        # Ejecutar la orquestación en un ejecutor asíncrono para evitar bloqueos
         loop = asyncio.get_event_loop()
         post_final = await loop.run_in_executor(None, ejecutar_orquestacion_agentes, idea)
 
