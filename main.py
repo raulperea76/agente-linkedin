@@ -8,24 +8,9 @@ from threading import Thread
 from flask import Flask
 
 from crewai import Agent, Task, Crew, Process
-from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_openai import ChatOpenAI
 
 # ---------------------------------------------------------
-# 1. Configurar Modelos de IA (PRIMERO)
-# ---------------------------------------------------------
-llm_gemini = ChatGoogleGenerativeAI(
-    model="gemini-1.5-pro",
-    google_api_key=os.getenv("GEMINI_API_KEY")
-)
-
-llm_gpt = ChatOpenAI(
-    model="gpt-4o",
-    openai_api_key=os.getenv("OPENAI_API_KEY")
-)
-
-# ---------------------------------------------------------
-# 2. Configurar Bot de Discord y Servidor Flask
+# 1. Configurar Bot de Discord y Servidor Flask
 # ---------------------------------------------------------
 intents = discord.Intents.default()
 intents.message_content = True
@@ -42,7 +27,7 @@ def run_flask():
     app.run(host="0.0.0.0", port=port)
 
 # ---------------------------------------------------------
-# 3. Generador de Imagen Automático
+# 2. Generador de Imagen Automático
 # ---------------------------------------------------------
 def generar_imagen_ejecutiva(prompt_idea: str) -> bytes:
     clean_prompt = requests.utils.quote(prompt_idea[:100])
@@ -54,7 +39,7 @@ def generar_imagen_ejecutiva(prompt_idea: str) -> bytes:
     raise Exception("No se pudo obtener la imagen.")
 
 # ---------------------------------------------------------
-# 4. Funciones para publicar en LinkedIn
+# 3. Funciones para publicar en LinkedIn
 # ---------------------------------------------------------
 def registrar_y_subir_imagen_linkedin(image_bytes: bytes, token: str, author: str) -> str:
     register_url = "https://api.linkedin.com/v2/assets?action=registerUpload"
@@ -129,14 +114,18 @@ def publicar_en_linkedin(texto_post: str, image_bytes_list: list = None) -> bool
     return res.status_code == 201
 
 # ---------------------------------------------------------
-# 5. Flujo Multiagente CrewAI
+# 4. Flujo Multiagente CrewAI
 # ---------------------------------------------------------
 def ejecutar_orquestacion_agentes(idea_usuario: str) -> str:
+    # Usamos identificadores compatibles con LiteLLM en CrewAI
+    llm_gemini_name = "gemini/gemini-1.5-pro"
+    llm_gpt_name = "gpt-4o"
+
     redactor = Agent(
         role='Redactor Ejecutivo de TI',
         goal='Crear borradores para LinkedIn basados en la experiencia del usuario.',
         backstory='Eres un líder de TI experimentado. Escribes con autoridad, de forma directa y enfocada en valor de negocio.',
-        llm=llm_gemini,
+        llm=llm_gemini_name,
         verbose=True
     )
 
@@ -144,7 +133,7 @@ def ejecutar_orquestacion_agentes(idea_usuario: str) -> str:
         role='Auditor Crítico Anti-IA',
         goal='Detectar y eliminar muletillas robóticas, frases hechas y clichés corporativos.',
         backstory='Aborreces los textos genéricos de IA. Exiges ganchos fuertes, oraciones cortas y tono 100% humano.',
-        llm=llm_gpt,
+        llm=llm_gpt_name,
         verbose=True
     )
 
@@ -152,7 +141,7 @@ def ejecutar_orquestacion_agentes(idea_usuario: str) -> str:
         role='Editor Final de Estilo',
         goal='Integrar las críticas y entregar la versión definitiva del post.',
         backstory='Especialista en pulir el mensaje conservando la autenticidad del autor.',
-        llm=llm_gemini,
+        llm=llm_gemini_name,
         verbose=True
     )
 
@@ -180,10 +169,11 @@ def ejecutar_orquestacion_agentes(idea_usuario: str) -> str:
         process=Process.sequential
     )
 
-    return str(crew.kickoff())
+    resultado = crew.kickoff()
+    return str(getattr(resultado, 'raw', resultado))
 
 # ---------------------------------------------------------
-# 6. Interfaz de Bot en Discord con Botones
+# 5. Interfaz de Bot en Discord con Botones
 # ---------------------------------------------------------
 class ComponentesAprobacion(discord.ui.View):
     def __init__(self, texto_post: str, image_bytes_list: list):
@@ -199,14 +189,14 @@ class ComponentesAprobacion(discord.ui.View):
         if exito:
             await interaction.followup.send("✅ **¡Publicado con éxito en LinkedIn con la imagen!**")
         else:
-            await interaction.followup.send("❌ **Error al publicar en LinkedIn.** Revisa tus credenciales.")
+            await interaction.followup.send("❌ **Error al publicar en LinkedIn.** Revisa tus credenciales o token de acceso.")
 
     @discord.ui.button(label="Descartar", style=discord.ButtonStyle.red, emoji="🗑️")
     async def descartar(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.send_message("❌ **Borrador descartado.**")
 
     # ---------------------------------------------------------
-    # 7. Comando principal del Bot
+    # 6. Comando principal del Bot
     # ---------------------------------------------------------
     @bot.command(name="post")
     async def comando_post(ctx, *, idea: str = ""):
@@ -218,31 +208,34 @@ class ComponentesAprobacion(discord.ui.View):
             for attachment in ctx.message.attachments:
                 if any(attachment.filename.lower().endswith(ext) for ext in ['png', 'jpg', 'jpeg', 'webp']):
                     img_bytes = await attachment.read()
-                images_to_upload.append(img_bytes)
-                await ctx.send("📷 *Imagen(es) recibida(s) desde tu galería.*")
+                    images_to_upload.append(img_bytes)
+                    await ctx.send("📷 *Imagen(es) recibida(s) desde tu galería.*")
 
-        else:
-            await ctx.send("🎨 *No adjuntaste imagen. Generando ilustración profesional...*")
-        try:
-            loop = asyncio.get_event_loop()
-            img_bytes = await loop.run_in_executor(None, generar_imagen_ejecutiva, idea)
-            images_to_upload.append(img_bytes)
-        except Exception as e:
-            await ctx.send(f"⚠️ *No se pudo generar la imagen ({e}). Se procesará solo texto.*")
+                else:
+                    await ctx.send("🎨 *No adjuntaste imagen. Generando ilustración profesional...*")
+                try:
+                    loop = asyncio.get_event_loop()
+                    img_bytes = await loop.run_in_executor(None, generar_imagen_ejecutiva, idea)
+                    images_to_upload.append(img_bytes)
+                except Exception as e:
+                    await ctx.send(f"⚠️ *No se pudo generar la imagen ({e}). Se procesará solo texto.*")
 
-        loop = asyncio.get_event_loop()
-        post_final = await loop.run_in_executor(None, ejecutar_orquestacion_agentes, idea)
+                try:
+                    loop = asyncio.get_event_loop()
+                    post_final = await loop.run_in_executor(None, ejecutar_orquestacion_agentes, idea)
 
-        vista = ComponentesAprobacion(texto_post=post_final, image_bytes_list=images_to_upload)
+                    vista = ComponentesAprobacion(texto_post=post_final, image_bytes_list=images_to_upload)
 
-        if images_to_upload:
-            file_preview = discord.File(fp=io.BytesIO(images_to_upload[0]), filename="preview.png")
-            await ctx.send(f"📝 **Propuesta de Post Final:**\n\n{post_final}", file=file_preview, view=vista)
-        else:
-            await ctx.send(f"📝 **Propuesta de Post Final:**\n\n{post_final}", view=vista)
+                    if images_to_upload:
+                        file_preview = discord.File(fp=io.BytesIO(images_to_upload[0]), filename="preview.png")
+                        await ctx.send(f"📝 **Propuesta de Post Final:**\n\n{post_final}", file=file_preview, view=vista)
+                    else:
+                        await ctx.send(f"📝 **Propuesta de Post Final:**\n\n{post_final}", view=vista)
+                except Exception as err:
+                    await ctx.send(f"❌ **Error durante la orquestación de IA:** `{err}`")
 
 # ---------------------------------------------------------
-# 8. Iniciar Servidores
+# 7. Iniciar Servidores
 # ---------------------------------------------------------
 if __name__ == "__main__":
     Thread(target=run_flask, daemon=True).start()
