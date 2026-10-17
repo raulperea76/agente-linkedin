@@ -558,49 +558,49 @@ def ejecutar_agentes(idea: str) -> str:
 
             if not is_authorized(interaction.user.id):
                 await interaction.followup.send("No tienes autorización.", ephemeral=True)
-            return
+                return
 
-        draft = get_draft(self.draft_id)
-        if not draft:
-            await interaction.followup.send("No se encontró el borrador.", ephemeral=True)
-        return
+            draft = get_draft(self.draft_id)
+            if not draft:
+                await interaction.followup.send("No se encontró el borrador.", ephemeral=True)
+                return
 
-        if not claim_draft(self.draft_id):
-            current = get_draft(self.draft_id)
-            state = current["status"] if current else "no disponible"
-            await interaction.followup.send(
-                f"El borrador ya fue procesado. Estado: {state}.",
-                ephemeral=True,
-            )
-            return
+            if not claim_draft(self.draft_id):
+                current = get_draft(self.draft_id)
+                state = current["status"] if current else "no disponible"
+                await interaction.followup.send(
+                    f"El borrador ya fue procesado. Estado: {state}.",
+                    ephemeral=True,
+                )
+                return
 
-        try:
-            image = bytes(draft["image"]) if draft["image"] else None
-            loop = asyncio.get_running_loop()
-
-            post_id = await loop.run_in_executor(
-                executor, publicar_en_linkedin, draft["text"], image
-            )
-
-            change_status(self.draft_id, "PUBLISHED", post_id=post_id)
-            self.disable_all_items()
-
-            await interaction.followup.send(
-                f"🚀 **¡Publicado exitosamente en LinkedIn!**\nID: `{post_id}`",
-                ephemeral=False,
-            )
             try:
-                await interaction.message.edit(view=self)
-            except Exception:
-                pass
+                image = bytes(draft["image"]) if draft["image"] else None
+                loop = asyncio.get_running_loop()
 
-        except Exception as e:
-            change_status(self.draft_id, "PENDING", error=str(e))
-            log.exception("Falló la publicación en LinkedIn.")
-            await interaction.followup.send(
-                f"❌ Error al publicar en LinkedIn: `{str(e)}`",
-                ephemeral=True,
-            )
+                post_id = await loop.run_in_executor(
+                    executor, publicar_en_linkedin, draft["text"], image
+                )
+
+                change_status(self.draft_id, "PUBLISHED", post_id=post_id)
+                self.disable_all_items()
+
+                await interaction.followup.send(
+                    f"🚀 **¡Publicado exitosamente en LinkedIn!**\nID: `{post_id}`",
+                    ephemeral=False,
+                )
+                try:
+                    await interaction.message.edit(view=self)
+                except Exception:
+                    pass
+
+            except Exception as e:
+                change_status(self.draft_id, "PENDING", error=str(e))
+                log.exception("Falló la publicación en LinkedIn.")
+                await interaction.followup.send(
+                    f"❌ Error al publicar en LinkedIn: `{str(e)}`",
+                    ephemeral=True,
+                )
 
         async def discard(self, interaction: discord.Interaction):
             if not is_authorized(interaction.user.id):
