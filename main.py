@@ -3,7 +3,6 @@ import io
 import requests
 import discord
 from discord.ext import commands
-from openai import OpenAI
 from threading import Thread
 from flask import Flask
 
@@ -12,18 +11,12 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_openai import ChatOpenAI
 
 # ---------------------------------------------------------
-# 1. Configurar el objeto Bot de Discord PRIMERO
+# 1. Configurar Bot de Discord y Servidor Flask
 # ---------------------------------------------------------
 intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-#LÍNEA AGREGADA / CORREGIDA
-client_openai= OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-
-# ---------------------------------------------------------
-# 2. Servidor Flask para mantener activo el servicio Render
-# ---------------------------------------------------------
 app = Flask(__name__)
 
 @app.route('/')
@@ -35,7 +28,7 @@ def run_flask():
     app.run(host="0.0.0.0", port=port)
 
     # ---------------------------------------------------------
-    # 3. Configurar Modelos y Clientes API
+    # 2. Configurar Modelos de IA (Gemini + ChatGPT)
     # ---------------------------------------------------------
     llm_gemini = ChatGoogleGenerativeAI(
         model="gemini-1.5-pro",
@@ -47,13 +40,23 @@ def run_flask():
         openai_api_key=os.getenv("OPENAI_API_KEY")
     )
 
-    client_openai = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+# ---------------------------------------------------------
+# 3. Generador de Imagen Automático (Sin restricciones de API Key)
+# ---------------------------------------------------------
+def generar_imagen_ejecutiva(prompt_idea: str) -> bytes:
+    """Genera una ilustración ejecutiva en HD basada en la idea del post."""
+    clean_prompt = requests.utils.quote(prompt_idea[:100])
+    image_url = f"https://pollinations.ai/p/Minimalist%20modern%20executive%20illustration%20for%20LinkedIn%20about%20{clean_prompt}?width=1024&height=1024&seed=42"
+
+    response = requests.get(image_url, timeout=30)
+    if response.status_code == 200:
+        return response.content
+    raise Exception("No se pudo obtener la imagen del generador público.")
 
 # ---------------------------------------------------------
-# 4. Funciones para subir imágenes a LinkedIn
+# 4. Funciones para publicar en LinkedIn
 # ---------------------------------------------------------
 def registrar_y_subir_imagen_linkedin(image_bytes: bytes, token: str, author: str) -> str:
-    """Registra la imagen en LinkedIn, sube el archivo binario y devuelve el URN del asset."""
     register_url = "https://api.linkedin.com/v2/assets?action=registerUpload"
     headers = {
         "Authorization": f"Bearer {token}",
@@ -84,7 +87,6 @@ def registrar_y_subir_imagen_linkedin(image_bytes: bytes, token: str, author: st
 
 
 def publicar_en_linkedin(texto_post: str, image_bytes_list: list = None) -> bool:
-    """Publica texto e imagen(es) en LinkedIn."""
     url = "https://api.linkedin.com/v2/ugcPosts"
     token = os.getenv("LINKEDIN_ACCESS_TOKEN")
     author = os.getenv("LINKEDIN_PERSON_URN")
@@ -127,22 +129,7 @@ def publicar_en_linkedin(texto_post: str, image_bytes_list: list = None) -> bool
     return res.status_code == 201
 
 # ---------------------------------------------------------
-# 5. Generador de Imagen con DALL-E 3
-# ---------------------------------------------------------
-def generar_imagen_dalle(prompt_idea: str) -> bytes:
-    """Genera una imagen con DALL-E 3 a partir del contenido del post."""
-    response = client_openai.images.generate(
-        model="dall-e-3",
-        prompt=f"Minimalist, modern executive illustration for LinkedIn about: {prompt_idea}. Professional tone, clean colors.",
-        size="1024x1024",
-        quality="standard",
-        n=1,
-    )
-    img_url = response.data[0].url
-    return requests.get(img_url).content
-
-# ---------------------------------------------------------
-# 6. Flujo Multiagente CrewAI
+# 5. Flujo Multiagente CrewAI
 # ---------------------------------------------------------
 def ejecutar_orquestacion_agentes(idea_usuario: str) -> str:
     redactor = Agent(
@@ -196,7 +183,7 @@ def ejecutar_orquestacion_agentes(idea_usuario: str) -> str:
     return str(crew.kickoff())
 
 # ---------------------------------------------------------
-# 7. Interfaz de Bot en Discord con Botones
+# 6. Interfaz de Bot en Discord con Botones
 # ---------------------------------------------------------
 class ComponentesAprobacion(discord.ui.View):
     def __init__(self, texto_post: str, image_bytes_list: list):
@@ -218,7 +205,7 @@ class ComponentesAprobacion(discord.ui.View):
         await interaction.response.send_message("❌ **Borrador descartado.**")
 
     # ---------------------------------------------------------
-    # 8. Comando principal del Bot
+    # 7. Comando principal del Bot
     # ---------------------------------------------------------
     @bot.command(name="post")
     async def comando_post(ctx, *, idea: str = ""):
@@ -234,12 +221,12 @@ class ComponentesAprobacion(discord.ui.View):
                 await ctx.send("📷 *Imagen(es) recibida(s) desde tu galería.*")
 
         else:
-            await ctx.send("🎨 *No adjuntaste imagen. Generando ilustración profesional con DALL-E 3...*")
+            await ctx.send("🎨 *No adjuntaste imagen. Generando ilustración profesional...*")
         try:
-            img_bytes = generar_imagen_dalle(idea)
+            img_bytes = generar_imagen_ejecutiva(idea)
             images_to_upload.append(img_bytes)
         except Exception as e:
-            await ctx.send(f"⚠️ *No se pudo generar la imagen con DALL-E ({e}). Se procesará solo texto.*")
+            await ctx.send(f"⚠️ *No se pudo generar la imagen ({e}). Se procesará solo texto.*")
 
         post_final = ejecutar_orquestacion_agentes(idea)
 
@@ -252,7 +239,7 @@ class ComponentesAprobacion(discord.ui.View):
             await ctx.send(f"📝 **Propuesta de Post Final:**\n\n{post_final}", view=vista)
 
 # ---------------------------------------------------------
-# 9. Iniciar Servidores
+# 8. Iniciar Servidores
 # ---------------------------------------------------------
 if __name__ == "__main__":
     Thread(target=run_flask, daemon=True).start()
