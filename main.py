@@ -1,272 +1,968 @@
-import os
-import io
-import sys
 import asyncio
-import requests
-import discord
-from discord.ext import commands
-from threading import Thread
+import io
+import logging
+import os
+import re
+import sqlite3
+import threading
+import uuid
 from concurrent.futures import ThreadPoolExecutor
-from flask import Flask
+from contextlib import contextmanager
+from urllib.parse import urlparse
 
-from crewai import Agent, Task, Crew, Process
-from langchain_google_genai import ChatGoogleGenerativeAI
-from langchain_openai import ChatOpenAI
+import discord
+import requests
+from discord.ext import commands
+from flask import Flask, jsonify
+from PIL import Image, UnidentifiedImageError
+from crewai import Agent, Task, Crew, Process, LLM
 
-# Executor para no bloquear el Event Loop de Discord
-executor = ThreadPoolExecutor(max_workers=4)
 
-# ---------------------------------------------------------
-# 1. Configurar Bot de Discord y Servidor Flask
-# ---------------------------------------------------------
-intents = discord.Intents.default()
-intents.message_content = True
-bot = commands.Bot(command_prefix="!", intents=intents)
+# =========================================================
+# 1. CONFIGURACIÓN
+# =========================================================
 
+logging.basicConfig(
+    level=os.getenv("LOG_LEVEL", "INFO"),
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+)
+log = logging.getLogger("linkedin-bot")
+
+DATABASE_PATH = os.getenv("DATABASE_PATH", "bot_state.sqlite3")
+PORT = int(os.getenv("PORT", "10000"))
+
+MAX_IMAGE_BYTES = 8 * 1024 * 1024
+MAX_IMAGE_PIXELS = 25_000_000
+MAX_IDEA_CHARS = 5000
+MAX_POST_CHARS = 3000
+PREVIEW_CHARS = 1700
+CREW_TIMEOUT = 120
+HTTP_TIMEOUT = (5, 30)
+
+LINKEDIN_POSTS_URL = "https://api.linkedin.com/rest/posts"
+LINKEDIN_IMAGES_URL = "https://api.linkedin.com/rest/images?action=initializeUpload"
+
+executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="linkedin-worker")
 app = Flask(__name__)
 
-@app.route('/')
+intents = discord.Intents.default()
+intents.message_content = True
+
+
+class LinkedInBot(commands.Bot):
+    async def setup_hook(self):
+        # Registrar botones persistentes de borradores pendientes.
+        try:
+            rows = list_drafts("PENDING", limit=10000)
+            for row in rows:
+                self.add_view(ApprovalView(row["id"]))
+                log.info("Vistas persistentes registradas: %s", len(rows))
+        except Exception:
+            log.exception("No se pudieron registrar las vistas persistentes.")
+            raise
+
+
+bot = LinkedInBot(command_prefix="!", intents=intents)
+
+
+def env_required(name: str) -> str:
+    value = os.getenv(name, "").strip()
+    if not value:
+        raise RuntimeError(f"Falta la variable de entorno: {name}")
+    return value
+
+
+def authorized_users() -> set[int]:
+    raw = env_required("DISCORD_ALLOWED_USER_IDS")
+    try:
+        ids = {int(item.strip()) for item in raw.split(",") if item.strip()}
+    except ValueError as exc:
+        raise RuntimeError(
+            "DISCORD_ALLOWED_USER_IDS debe contener IDs numéricos separados por comas."
+        ) from exc
+    if not ids:
+        raise RuntimeError("DISCORD_ALLOWED_USER_IDS no contiene IDs.")
+    return ids
+
+
+def is_authorized(user_id: int) -> bool:
+    try:
+        return user_id in authorized_users()
+    except Exception:
+        log.exception("No se pudo validar al usuario.")
+        return False
+
+
+def check_configuration() -> None:
+    for name in (
+        "DISCORD_BOT_TOKEN",
+        "LINKEDIN_ACCESS_TOKEN",
+        "LINKEDIN_PERSON_URN",
+        "LINKEDIN_VERSION",
+        "GEMINI_API_KEY",
+        "OPENAI_API_KEY",
+    ):
+        env_required(name)
+
+    authorized_users()
+
+    author = env_required("LINKEDIN_PERSON_URN")
+    if not re.fullmatch(r"urn:li:(person|organization):[A-Za-z0-9_-]+", author):
+        raise RuntimeError("LINKEDIN_PERSON_URN no tiene formato válido.")
+
+    version = env_required("LINKEDIN_VERSION")
+    if not re.fullmatch(r"\d{6}", version):
+        raise RuntimeError("LINKEDIN_VERSION debe tener formato YYYYMM.")
+
+    if not DATABASE_PATH:
+        raise RuntimeError("DATABASE_PATH no puede estar vacío.")
+
+
+# =========================================================
+# 2. BASE DE DATOS
+# =========================================================
+
+@contextmanager
+def db():
+    conn = sqlite3.connect(DATABASE_PATH, timeout=15)
+    conn.row_factory = sqlite3.Row
+    try:
+        conn.execute("PRAGMA busy_timeout=15000")
+        conn.execute("PRAGMA foreign_keys=ON")
+        yield conn
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def init_db() -> None:
+    with db() as conn:
+        conn.execute("""
+CREATE TABLE IF NOT EXISTS drafts (
+id TEXT PRIMARY KEY,
+owner_id INTEGER NOT NULL,
+text TEXT NOT NULL,
+image BLOB,
+status TEXT NOT NULL,
+post_id TEXT,
+error TEXT,
+created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+)
+""")
+        conn.execute("""
+CREATE INDEX IF NOT EXISTS idx_drafts_status_created
+ON drafts(status, created_at)
+""")
+        # No se reintenta una publicación interrumpida: LinkedIn pudo aceptarla.
+        conn.execute("""
+UPDATE drafts
+SET status = 'UNKNOWN',
+error = 'Proceso reiniciado durante la publicación; verificar LinkedIn',
+updated_at = CURRENT_TIMESTAMP
+WHERE status = 'PUBLISHING'
+""")
+
+
+def save_draft(draft_id: str, owner_id: int, text: str, image: bytes | None) -> None:
+    with db() as conn:
+        conn.execute("""
+INSERT INTO drafts (id, owner_id, text, image, status)
+VALUES (?, ?, ?, ?, 'PENDING')
+""", (draft_id, owner_id, text, image))
+
+
+def get_draft(draft_id: str):
+    with db() as conn:
+        return conn.execute(
+            "SELECT * FROM drafts WHERE id = ?", (draft_id,)
+        ).fetchone()
+
+
+def claim_draft(draft_id: str) -> bool:
+    # Una sola operación puede cambiar PENDING -> PUBLISHING.
+    with db() as conn:
+        result = conn.execute("""
+UPDATE drafts
+SET status = 'PUBLISHING', error = NULL,
+updated_at = CURRENT_TIMESTAMP
+WHERE id = ? AND status = 'PENDING'
+""", (draft_id,))
+        return result.rowcount == 1
+
+
+def discard_draft(draft_id: str) -> bool:
+    with db() as conn:
+        result = conn.execute("""
+UPDATE drafts
+SET status = 'DISCARDED', updated_at = CURRENT_TIMESTAMP
+WHERE id = ? AND status = 'PENDING'
+""", (draft_id,))
+        return result.rowcount == 1
+
+
+def change_status(
+    draft_id: str,
+    status: str,
+    post_id: str | None = None,
+    error: str | None = None,
+) -> None:
+    safe_error = error[:1000] if error else None
+    with db() as conn:
+        conn.execute("""
+UPDATE drafts
+SET status = ?, post_id = COALESCE(?, post_id), error = ?,
+updated_at = CURRENT_TIMESTAMP
+WHERE id = ?
+""", (status, post_id, safe_error, draft_id))
+
+
+def list_drafts(status: str, limit: int = 20):
+    with db() as conn:
+        return conn.execute("""
+SELECT id, owner_id, text, status, post_id, error, created_at
+FROM drafts
+WHERE status = ?
+ORDER BY created_at DESC
+LIMIT ?
+""", (status, limit)).fetchall()
+
+
+def database_ok() -> bool:
+    try:
+        with db() as conn:
+            conn.execute("SELECT 1").fetchone()
+            return True
+    except Exception:
+        log.exception("Falló el health check de SQLite.")
+        return False
+
+
+# =========================================================
+# 3. FLASK: HEALTH CHECK
+# =========================================================
+
+@app.get("/")
 def home():
-    return "Bot de LinkedIn Activo 24/7", 200
+    return "Bot de LinkedIn activo", 200
+
+
+@app.get("/live")
+def live():
+    # Indica que el proceso web responde, no que todas las dependencias estén listas.
+    return jsonify({"status": "alive"}), 200
+
+
+@app.get("/health")
+def health():
+    db_ready = database_ok()
+    discord_ready = bot.is_ready()
+    healthy = db_ready and discord_ready
+    return jsonify({
+        "status": "ok" if healthy else "degraded",
+        "database": "ok" if db_ready else "error",
+        "discord": "ready" if discord_ready else "not_ready",
+    }), (200 if healthy else 503)
+
 
 def run_flask():
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=PORT, use_reloader=False)
 
-# ---------------------------------------------------------
-# 2. Generador de Imagen con Timeout Rápido
-# ---------------------------------------------------------
-def generar_imagen_ejecutiva(prompt_idea: str) -> bytes:
-    print(f"[LOG] Solicitando imagen para: {prompt_idea[:40]}...", flush=True)
-    clean_prompt = requests.utils.quote(prompt_idea[:80])
-    image_url = f"https://pollinations.ai/p/Minimalist%20modern%20executive%20illustration%20for%20LinkedIn%20about%20{clean_prompt}?width=1024&height=1024&seed=42"
 
-    response = requests.get(image_url, timeout=6)
-    if response.status_code == 200:
-        print("[LOG] Imagen obtenida exitosamente.", flush=True)
-    return response.content
-    raise Exception(f"HTTP {response.status_code}")
+# =========================================================
+# 4. VALIDACIÓN Y GENERACIÓN DE IMÁGENES
+# =========================================================
 
-# ---------------------------------------------------------
-# 3. Funciones para publicar en LinkedIn
-# ---------------------------------------------------------
-def registrar_y_subir_imagen_linkedin(image_bytes: bytes, token: str, author: str) -> str:
-    register_url = "https://api.linkedin.com/v2/assets?action=registerUpload"
-    headers = {
-        "Authorization": f"Bearer {token}",
+def validate_image(data: bytes) -> bytes:
+    if not data:
+        raise ValueError("La imagen está vacía.")
+    if len(data) > MAX_IMAGE_BYTES:
+        raise ValueError("La imagen supera el límite de 8 MiB.")
+
+    try:
+        with Image.open(io.BytesIO(data)) as img:
+            if img.width * img.height > MAX_IMAGE_PIXELS:
+                raise ValueError("La imagen tiene demasiados píxeles.")
+            img.verify()
+
+        with Image.open(io.BytesIO(data)) as img:
+            if img.format not in ("PNG", "JPEG", "WEBP"):
+                raise ValueError("Formato permitido: PNG, JPEG o WEBP.")
+            if img.width * img.height > MAX_IMAGE_PIXELS:
+                raise ValueError("La imagen tiene demasiados píxeles.")
+            img.load()
+            normalized = img.convert("RGBA" if "A" in img.getbands() else "RGB")
+            output = io.BytesIO()
+            normalized.save(output, format="PNG", optimize=True)
+            result = output.getvalue()
+
+            if len(result) > MAX_IMAGE_BYTES:
+                raise ValueError("La imagen procesada supera 8 MiB.")
+            return result
+
+    except UnidentifiedImageError as exc:
+        raise ValueError("El archivo no es una imagen válida.") from exc
+    except Image.DecompressionBombError as exc:
+        raise ValueError("La imagen excede los límites de seguridad.") from exc
+
+
+def generar_imagen(idea: str) -> bytes:
+    prompt = (
+        "Minimalist, sophisticated editorial illustration for LinkedIn. "
+        "Professional executive theme, clean composition, no text, no logos. "
+        + idea[:500]
+    )
+    response = requests.get(
+        "https://image.pollinations.ai/prompt/"
+        + requests.utils.quote(prompt, safe=""),
+        params={"width": 1024, "height": 1024, "seed": 42, "nologo": "true"},
+        timeout=(5, 20),
+    )
+    response.raise_for_status()
+    return validate_image(response.content)
+
+
+# =========================================================
+# 5. LINKEDIN
+# =========================================================
+
+def linkedin_headers() -> dict[str, str]:
+    return {
+        "Authorization": f"Bearer {env_required('LINKEDIN_ACCESS_TOKEN')}",
+        "Linkedin-Version": env_required("LINKEDIN_VERSION"),
+        "X-Restli-Protocol-Version": "2.0.0",
         "Content-Type": "application/json",
-        "X-Restli-Protocol-Version": "2.0.0"
     }
 
-    register_payload = {
-        "registerUploadRequest": {
-        "recipes": ["urn:li:digitalmediaRecipe:feedshare-image"],
-        "owner": author,
-        "serviceRelationships": [{"relationshipType": "OWNER", "identifier": "urn:li:userGeneratedContent"}]
-    }
-    }
 
-    reg_res = requests.post(register_url, headers=headers, json=register_payload)
-    if reg_res.status_code != 200:
-        print(f"[ERROR LinkedIn Register] {reg_res.text}", flush=True)
-        return None
+def subir_imagen_linkedin(image_bytes: bytes) -> str:
+    author = env_required("LINKEDIN_PERSON_URN")
+    image_bytes = validate_image(image_bytes)
 
-    reg_data = reg_res.json()["value"]
-    upload_url = reg_data["uploadMechanism"]["com.linkedin.digitalmedia.uploading.MediaUploadHttpRequest"]["uploadUrl"]
-    asset_urn = reg_data["asset"]
+    response = requests.post(
+        LINKEDIN_IMAGES_URL,
+        headers=linkedin_headers(),
+        json={"initializeUploadRequest": {"owner": author}},
+        timeout=HTTP_TIMEOUT,
+    )
+    if not response.ok:
+        raise RuntimeError(
+            f"LinkedIn no pudo inicializar la imagen (HTTP {response.status_code})."
+        )
 
-    upload_headers = {"Authorization": f"Bearer {token}"}
-    up_res = requests.put(upload_url, headers=upload_headers, data=image_bytes)
+    try:
+        value = response.json()["value"]
+        upload_url = value["uploadUrl"]
+        image_urn = value["image"]
+    except (ValueError, KeyError, TypeError) as exc:
+        raise RuntimeError("Respuesta inesperada al inicializar la imagen.") from exc
 
-    return asset_urn if up_res.status_code in [200, 201] else None
+    # Evita enviar el archivo a un host inesperado si la respuesta fuera manipulada.
+    parsed = urlparse(upload_url)
+    if parsed.scheme != "https" or not (
+        parsed.hostname == "linkedin.com"
+        or (parsed.hostname and parsed.hostname.endswith(".linkedin.com"))
+    ):
+        raise RuntimeError("LinkedIn devolvió una URL de carga no permitida.")
+
+    upload = requests.put(
+        upload_url,
+        headers={"Content-Type": "application/octet-stream"},
+        data=image_bytes,
+        timeout=HTTP_TIMEOUT,
+        allow_redirects=False,
+    )
+    if upload.status_code not in (200, 201, 204):
+        raise RuntimeError(
+            f"LinkedIn rechazó la carga de la imagen (HTTP {upload.status_code})."
+        )
+    return image_urn
 
 
-def publicar_en_linkedin(texto_post: str, image_bytes_list: list = None) -> bool:
-    url = "https://api.linkedin.com/v2/ugcPosts"
-    token = os.getenv("LINKEDIN_ACCESS_TOKEN")
-    author = os.getenv("LINKEDIN_PERSON_URN")
-
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Content-Type": "application/json",
-        "X-Restli-Protocol-Version": "2.0.0"
-    }
-
-    media_list = []
-
-    if image_bytes_list:
-        for img_bytes in image_bytes_list:
-            asset_urn = registrar_y_subir_imagen_linkedin(img_bytes, token, author)
-            if asset_urn:
-                media_list.append({
-                    "status": "READY",
-                    "description": {"text": "Imagen del post"},
-                    "media": asset_urn,
-                    "title": {"text": "Imagen"}
-                })
-
-        share_category = "IMAGE" if media_list else "NONE"
+def publicar_en_linkedin(texto: str, image_bytes: bytes | None = None) -> str:
+    texto = texto.strip()
+    if not texto:
+        raise ValueError("El texto del post está vacío.")
+    if len(texto) > MAX_POST_CHARS:
+        raise ValueError(f"El post supera {MAX_POST_CHARS} caracteres.")
 
     payload = {
-        "author": author,
-        "lifecycleState": "PUBLISHED",
-        "specificContent": {
-        "com.linkedin.ugc.ShareContent": {
-        "shareCommentary": {"text": texto_post},
-        "shareMediaCategory": share_category,
-        "media": media_list if media_list else []
-    }
+        "author": env_required("LINKEDIN_PERSON_URN"),
+        "commentary": texto,
+        "visibility": "PUBLIC",
+        "distribution": {
+        "feedDistribution": "MAIN_FEED",
+        "targetEntities": [],
+        "thirdPartyDistributionChannels": [],
     },
-        "visibility": {"com.linkedin.ugc.MemberNetworkVisibility": "PUBLIC"}
+        "lifecycleState": "PUBLISHED",
+        "isReshareDisabledByAuthor": False,
     }
 
-    res = requests.post(url, headers=headers, json=payload)
-    if res.status_code != 201:
-        print(f"[ERROR LinkedIn Publish] {res.text}", flush=True)
-    return res.status_code == 201
+    if image_bytes:
+        image_urn = subir_imagen_linkedin(image_bytes)
+        payload["content"] = {
+            "media": {
+            "id": image_urn,
+            "altText": "Ilustración para la publicación",
+        }
+        }
 
-# ---------------------------------------------------------
-# 4. Flujo Multiagente CrewAI (Con clientes explícitos)
-# ---------------------------------------------------------
-def ejecutar_orquestacion_agentes(idea_usuario: str) -> str:
-    print("[LOG] Inicializando modelos LangChain...", flush=True)
+    # No se reintenta esta solicitud: un timeout puede ocurrir después de crear el post.
+    response = requests.post(
+        LINKEDIN_POSTS_URL,
+        headers=linkedin_headers(),
+        json=payload,
+        timeout=HTTP_TIMEOUT,
+    )
+    if response.status_code != 201:
+        raise RuntimeError(
+            f"LinkedIn no confirmó la publicación (HTTP {response.status_code}). "
+            "Verifica el estado en LinkedIn antes de reintentar."
+        )
 
-    llm_gemini = ChatGoogleGenerativeAI(
-        model="gemini-1.5-pro",
-        google_api_key=os.getenv("GEMINI_API_KEY")
+    post_id = response.headers.get("x-restli-id")
+    if not post_id:
+        # HTTP 201 sugiere creación, pero sin ID no damos por confirmada la operación.
+        raise RuntimeError(
+            "LinkedIn respondió 201 pero no devolvió x-restli-id; verificar manualmente."
+        )
+    return post_id
+
+
+# =========================================================
+# 6. CREWAI: TRES AGENTES
+# =========================================================
+
+def ejecutar_agentes(idea: str) -> str:
+    idea = idea.strip()
+    if not idea:
+        raise ValueError("La idea está vacía.")
+
+    gemini = LLM(
+        model=os.getenv("GEMINI_MODEL", "gemini/gemini-2.5-flash"),
+        api_key=env_required("GEMINI_API_KEY"),
+    )
+    openai = LLM(
+        model=os.getenv("OPENAI_MODEL", "openai/gpt-4o"),
+        api_key=env_required("OPENAI_API_KEY"),
     )
 
-    llm_gpt = ChatOpenAI(
-        model="gpt-4o",
-        openai_api_key=os.getenv("OPENAI_API_KEY")
-    )
-
-    print("[LOG] Creando agentes de CrewAI...", flush=True)
+    common = {
+        "verbose": False,
+        "allow_delegation": False,
+        "max_iter": 3,
+        "max_execution_time": CREW_TIMEOUT,
+    }
 
     redactor = Agent(
-        role='Redactor Ejecutivo de TI',
-        goal='Crear borradores para LinkedIn basados en la experiencia del usuario.',
-        backstory='Eres un líder de TI experimentado. Escribes con autoridad, de forma directa y enfocada en valor de negocio.',
-        llm=llm_gemini,
-        verbose=True
+        role="Redactor Ejecutivo de TI",
+        goal="Redactar posts claros, personales y orientados al negocio.",
+        backstory=(
+        "Líder de tecnología experimentado. Evitas clichés y no inventas "
+        "hechos, cifras ni experiencias."
+    ),
+        llm=gemini,
+        **common,
     )
-
     critico = Agent(
-        role='Auditor Crítico Anti-IA',
-        goal='Detectar y eliminar muletillas robóticas, frases hechas y clichés corporativos.',
-        backstory='Aborreces los textos genéricos de IA. Exiges ganchos fuertes, oraciones cortas y tono 100% humano.',
-        llm=llm_gpt,
-        verbose=True
+        role="Auditor Crítico de Estilo",
+        goal="Detectar clichés, frases genéricas y afirmaciones dudosas.",
+        backstory=(
+        "Editor exigente que prefiere lenguaje directo, natural y específico."
+    ),
+        llm=openai,
+        **common,
+    )
+    editor = Agent(
+        role="Editor Final",
+        goal="Entregar la versión final lista para aprobación humana.",
+        backstory=(
+        "Conservas la autenticidad del autor y no agregas experiencias "
+        "o datos que no fueron proporcionados."
+    ),
+        llm=gemini,
+        **common,
     )
 
-    pulidor = Agent(
-        role='Editor Final de Estilo',
-        goal='Integrar las críticas y entregar la versión definitiva del post.',
-        backstory='Especialista en pulir el mensaje conservando la autenticidad del autor.',
-        llm=llm_gemini,
-        verbose=True
-    )
-
-    t1 = Task(
-        description=f'Escribe un borrador de post para LinkedIn sobre esta idea: {idea_usuario}',
-        expected_output='Borrador completo estructurado.',
-        agent=redactor
-    )
-
-    t2 = Task(
-        description='Audita el borrador anterior. Señala qué frases suenan sintéticas o cliché y propone mejoras.',
-        expected_output='Lista de correcciones críticas.',
-        agent=critico
-    )
-
-    t3 = Task(
-        description='Reescribe el post aplicando las correcciones del auditor. Devuelve SOLO el texto final listo para publicar.',
-        expected_output='Post definitivo para LinkedIn.',
-        agent=pulidor
-    )
+    tasks = [
+        Task(
+        description=(
+        "Redacta un post para LinkedIn basado en esta idea. "
+        "No inventes hechos ni experiencias:\n\n" + idea
+    ),
+        expected_output="Borrador completo del post.",
+        agent=redactor,
+    ),
+        Task(
+        description=(
+        "Audita el borrador anterior. Identifica clichés, frases "
+        "artificiales y afirmaciones no sustentadas."
+    ),
+        expected_output="Críticas concretas y accionables.",
+        agent=critico,
+    ),
+        Task(
+        description=(
+        "Aplica las críticas y devuelve únicamente el texto final, "
+        "sin comentarios ni introducciones."
+    ),
+        expected_output="Post final listo para revisión.",
+        agent=editor,
+    ),
+    ]
 
     crew = Crew(
-        agents=[redactor, critico, pulidor],
-        tasks=[t1, t2, t3],
-        process=Process.sequential
+        agents=[redactor, critico, editor],
+        tasks=tasks,
+        process=Process.sequential,
+        verbose=False,
     )
+    result = crew.kickoff()
+    text = str(getattr(result, "raw", result)).strip()
 
-    print("[LOG] Ejecutando CrewAI kickoff...", flush=True)
-    resultado = crew.kickoff()
-    print("[LOG] CrewAI finalizado con éxito.", flush=True)
-    return str(getattr(resultado, 'raw', resultado))
+    if not text:
+        raise RuntimeError("CrewAI devolvió un resultado vacío.")
+    if len(text) > MAX_POST_CHARS:
+        raise ValueError(
+            f"El borrador supera {MAX_POST_CHARS} caracteres; solicita una versión más corta."
+        )
+    return text
 
-# ---------------------------------------------------------
-# 5. Interfaz de Bot en Discord con Botones
-# ---------------------------------------------------------
-class ComponentesAprobacion(discord.ui.View):
-    def __init__(self, texto_post: str, image_bytes_list: list):
+
+# =========================================================
+# 7. VISTAS PERSISTENTES Y APROBACIÓN
+# =========================================================
+
+class ApprovalView(discord.ui.View):
+    def __init__(self, draft_id: str):
         super().__init__(timeout=None)
-        self.texto_post = texto_post
-        self.image_bytes_list = image_bytes_list
+        self.draft_id = draft_id
 
-    @discord.ui.button(label="Aprobar y Publicar", style=discord.ButtonStyle.green, emoji="🚀")
-    async def publicar(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer()
-        loop = asyncio.get_event_loop()
-        exito = await loop.run_in_executor(executor, publicar_en_linkedin, self.texto_post, self.image_bytes_list)
-        if exito:
-            await interaction.followup.send("✅ **¡Publicado con éxito en LinkedIn con la imagen!**")
+        approve = discord.ui.Button(
+            label="Aprobar y publicar",
+            style=discord.ButtonStyle.success,
+            emoji="🚀",
+            custom_id=f"linkedin:approve:{draft_id}",
+        )
+        approve.callback = self.approve
+        self.add_item(approve)
+
+        discard = discord.ui.Button(
+            label="Descartar",
+            style=discord.ButtonStyle.danger,
+            emoji="🗑️",
+            custom_id=f"linkedin:discard:{draft_id}",
+        )
+        discard.callback = self.discard
+        self.add_item(discard)
+
+    async def approve(self, interaction: discord.Interaction):
+        if not is_authorized(interaction.user.id):
+            await interaction.response.send_message(
+                "No tienes autorización para publicar.", ephemeral=True
+            )
+        return
+
+        await interaction.response.defer(ephemeral=True, thinking=True)
+
+        try:
+            draft = get_draft(self.draft_id)
+            if not draft:
+                await interaction.followup.send("No se encontró el borrador.", ephemeral=True)
+            return
+
+        if not claim_draft(self.draft_id):
+            current = get_draft(self.draft_id)
+            state = current["status"] if current else "no disponible"
+            await interaction.followup.send(
+                f"El borrador ya fue procesado. Estado: {state}.",
+                ephemeral=True,
+            )
+            return
+
+        image = bytes(draft["image"]) if draft["image"] else None
+        loop = asyncio.get_running_loop()
+        future = loop.run_in_executor(
+            executor, publicar_en_linkedin, draft["text"], image
+        )
+
+        try:
+            post_id = await asyncio.wait_for(asyncio.shield(future), timeout=90)
+        except asyncio.TimeoutError:
+            change_status(
+                self.draft_id,
+                "UNKNOWN",
+                error=(
+                "Timeout esperando confirmación. La operación pudo continuar "
+                "en segundo plano; verificar LinkedIn antes de reintentar."
+            ),
+            )
+        await interaction.followup.send(
+            "Se agotó el tiempo de espera. No vuelvas a publicarlo todavía: "
+            "verifica primero LinkedIn.",
+            ephemeral=True,
+        )
+        return
+
+        change_status(self.draft_id, "PUBLISHED", post_id=post_id)
+        self.disable_all_items()
+        try:
+            if interaction.message:
+                await interaction.message.edit(view=self)
+        except discord.HTTPException:
+            log.warning("No se pudo actualizar el mensaje de aprobación.")
+
+            await interaction.followup.send(
+                f"Publicación confirmada. ID: `{post_id}`", ephemeral=True
+            )
+
+        except Exception:
+            log.exception("Error durante la aprobación/publicación.")
+        try:
+            current = get_draft(self.draft_id)
+            if current and current["status"] == "PUBLISHING":
+                change_status(
+                    self.draft_id,
+                    "UNKNOWN",
+                    error="Resultado incierto; revisar LinkedIn antes de reintentar.",
+                )
+        except Exception:
+            log.exception("No se pudo guardar el estado de error del borrador.")
+
+            await interaction.followup.send(
+                "No se pudo confirmar el resultado. Revisa LinkedIn y los logs "
+                "antes de intentar otra publicación.",
+                ephemeral=True,
+            )
+
+    async def discard(self, interaction: discord.Interaction):
+        if not is_authorized(interaction.user.id):
+            await interaction.response.send_message(
+                "No tienes autorización para descartar.", ephemeral=True
+            )
+        return
+
+        try:
+            if not discard_draft(self.draft_id):
+                draft = get_draft(self.draft_id)
+                state = draft["status"] if draft else "no disponible"
+                await interaction.response.send_message(
+                    f"No se pudo descartar. Estado actual: {state}.",
+                    ephemeral=True,
+                )
+                return
+
+            self.disable_all_items()
+            await interaction.response.edit_message(
+                content="Borrador descartado.", view=self
+            )
+        except Exception:
+            log.exception("No se pudo descartar el borrador.")
+        if not interaction.response.is_done():
+            await interaction.response.send_message(
+                "No se pudo actualizar el borrador. Intenta de nuevo o revisa los logs.",
+                ephemeral=True,
+            )
+
+    def disable_all_items(self):
+        for item in self.children:
+            item.disabled = True
+
+
+    def render_draft_message(draft) -> str:
+        preview = draft["text"]
+        if len(preview) > PREVIEW_CHARS:
+            preview = preview[:PREVIEW_CHARS] + "\n\n[Vista previa recortada.]"
+        return (
+            f"**Borrador para revisar**\n\n{preview}\n\n"
+            f"ID del borrador: `{draft['id']}`"
+        )
+
+
+    async def send_draft_preview(ctx, draft) -> None:
+        view = ApprovalView(draft["id"])
+        content = render_draft_message(draft)
+
+        if draft["image"]:
+            file = discord.File(io.BytesIO(bytes(draft["image"])), filename="preview.png")
+            await ctx.send(content=content, file=file, view=view)
         else:
-            await interaction.followup.send("❌ **Error al publicar en LinkedIn.** Revisa tus credenciales.")
+            await ctx.send(content=content, view=view)
 
-    @discord.ui.button(label="Descartar", style=discord.ButtonStyle.red, emoji="🗑️")
-    async def descartar(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_message("❌ **Borrador descartado.**")
 
-    # ---------------------------------------------------------
-    # 6. Comando principal del Bot
-    # ---------------------------------------------------------
+    # =========================================================
+    # 8. COMANDOS DISCORD
+    # =========================================================
+
     @bot.command(name="post")
-    async def comando_post(ctx, *, idea: str = ""):
-        await ctx.send("⚙️ *Orquestando agentes y procesando imagen...*")
+    @commands.guild_only()
+    async def comando_post(ctx: commands.Context, *, idea: str = ""):
+        if not is_authorized(ctx.author.id):
+            await ctx.reply("No tienes autorización para usar este bot.")
+            return
 
-        images_to_upload = []
+        idea = idea.strip()
+        if not idea:
+            await ctx.reply("Uso: `!post tu idea para LinkedIn`")
+        return
+        if len(idea) > MAX_IDEA_CHARS:
+            await ctx.reply(f"La idea supera el máximo de {MAX_IDEA_CHARS} caracteres.")
+            return
 
-        # A) Foto adjunta desde galería
+        status_message = await ctx.send("⚙️ Generando el borrador con CrewAI...")
+
+        # Si el usuario adjunta imagen, se valida antes de gastar recursos de IA.
+        image_bytes = None
         if ctx.message.attachments:
-            for attachment in ctx.message.attachments:
-                if any(attachment.filename.lower().endswith(ext) for ext in ['png', 'jpg', 'jpeg', 'webp']):
-                    img_bytes = await attachment.read()
-                    images_to_upload.append(img_bytes)
-                    await ctx.send("📷 *Imagen(es) recibida(s) desde tu galería.*")
+            attachment = ctx.message.attachments[0]
+            try:
+                if attachment.size > MAX_IMAGE_BYTES:
+                    raise ValueError("La imagen supera el límite de 8 MiB.")
+                image_bytes = validate_image(await attachment.read())
+            except Exception as exc:
+                await status_message.edit(content=f"No se pudo usar la imagen: {exc}")
+            return
 
-                # B) Generación automática de imagen
-                else:
-                    await ctx.send("🎨 *No adjuntaste imagen. Generando ilustración profesional...*")
-                try:
-                    loop = asyncio.get_event_loop()
-                    img_bytes = await loop.run_in_executor(executor, generar_imagen_ejecutiva, idea)
-                    images_to_upload.append(img_bytes)
-                except Exception as e:
-                    print(f"[WARN] Error/Timeout generando imagen: {e}", flush=True)
-                    await ctx.send("⚠️ *La generación de imagen tardó demasiado. Se procesará solo texto.*")
+        loop = asyncio.get_running_loop()
+        try:
+            post_text = await asyncio.wait_for(
+                asyncio.shield(loop.run_in_executor(executor, ejecutar_agentes, idea)),
+                timeout=CREW_TIMEOUT + 15,
+            )
+        except asyncio.TimeoutError:
+            await status_message.edit(
+                content=(
+                "La generación tardó demasiado. El trabajo puede seguir en segundo plano; "
+                "espera y revisa los logs antes de volver a intentarlo."
+            )
+            )
+            return
+        except Exception:
+            log.exception("Falló la generación del post.")
+            await status_message.edit(
+                content="No se pudo generar el borrador. Revisa los logs privados."
+            )
+            return
 
-                # C) Ejecutar CrewAI en hilo aislado
-                try:
-                    loop = asyncio.get_event_loop()
-                    post_final = await loop.run_in_executor(executor, ejecutar_orquestacion_agentes, idea)
+        # La imagen automática se genera después del texto para evitar gasto innecesario.
+        if image_bytes is None:
+            try:
+                image_bytes = await asyncio.wait_for(
+                    asyncio.shield(loop.run_in_executor(executor, generar_imagen, idea)),
+                    timeout=25,
+                )
+            except Exception:
+                log.warning("No se pudo generar imagen; se continuará sin ella.", exc_info=True)
+                image_bytes = None
 
-                    vista = ComponentesAprobacion(texto_post=post_final, image_bytes_list=images_to_upload)
+            draft_id = uuid.uuid4().hex
+            try:
+                save_draft(draft_id, ctx.author.id, post_text, image_bytes)
+                draft = get_draft(draft_id)
+            except Exception:
+                log.exception("No se pudo guardar el borrador.")
+                await status_message.edit(content="No se pudo guardar el borrador; no se publicará.")
+                return
 
-                    if images_to_upload:
-                        file_preview = discord.File(fp=io.BytesIO(images_to_upload[0]), filename="preview.png")
-                        await ctx.send(f"📝 **Propuesta de Post Final:**\n\n{post_final}", file=file_preview, view=vista)
-                    else:
-                        await ctx.send(f"📝 **Propuesta de Post Final:**\n\n{post_final}", view=vista)
+            try:
+                await status_message.delete()
+            except discord.HTTPException:
+                pass
 
-                except Exception as err:
-                    print(f"[ERROR CrewAI] {err}", flush=True)
-                    await ctx.send(f"❌ **Error durante la orquestación de IA:** `{err}`")
+            try:
+                await send_draft_preview(ctx, draft)
+            except discord.HTTPException:
+                log.exception("No se pudo enviar la vista previa.")
+                await ctx.send(
+                    "No se pudo mostrar la vista previa. El borrador quedó guardado. "
+                    f"Usa `!recuperar {draft_id}` para volver a mostrarlo."
+                )
 
-# ---------------------------------------------------------
-# 7. Iniciar Servidores
-# ---------------------------------------------------------
+
+    @bot.command(name="pendientes")
+    @commands.guild_only()
+    async def comando_pendientes(ctx: commands.Context):
+        if not is_authorized(ctx.author.id):
+            await ctx.reply("No tienes autorización para consultar borradores.")
+        return
+
+        try:
+            drafts = list_drafts("PENDING", limit=15)
+        except Exception:
+            log.exception("No se pudieron consultar borradores pendientes.")
+            await ctx.reply("No se pudo consultar la base de datos.")
+            return
+
+        if not drafts:
+            await ctx.reply("No hay borradores pendientes.")
+            return
+
+        lines = ["**Borradores pendientes**"]
+        for draft in drafts:
+            short_text = draft["text"].replace("\n", " ")
+            if len(short_text) > 100:
+                short_text = short_text[:100] + "…"
+                lines.append(f"• `{draft['id']}` — {short_text}")
+                lines.append("Usa `!recuperar ID` para volver a mostrar uno.")
+                await ctx.reply("\n".join(lines))
+
+
+    @bot.command(name="recuperar")
+    @commands.guild_only()
+    async def comando_recuperar(ctx: commands.Context, draft_id: str = ""):
+        if not is_authorized(ctx.author.id):
+            await ctx.reply("No tienes autorización para recuperar borradores.")
+        return
+        if not re.fullmatch(r"[0-9a-f]{32}", draft_id or ""):
+            await ctx.reply("Uso: `!recuperar ID_DEL_BORRADOR`")
+        return
+
+        try:
+            draft = get_draft(draft_id)
+        except Exception:
+            log.exception("No se pudo recuperar el borrador.")
+            await ctx.reply("No se pudo consultar la base de datos.")
+            return
+
+        if not draft:
+            await ctx.reply("No se encontró el borrador.")
+        return
+        if draft["status"] != "PENDING":
+            await ctx.reply(f"El borrador no está pendiente. Estado: `{draft['status']}`.")
+        return
+
+        try:
+            await send_draft_preview(ctx, draft)
+        except discord.HTTPException:
+            log.exception("No se pudo volver a mostrar el borrador.")
+            await ctx.reply("Discord no pudo mostrar el borrador; inténtalo de nuevo más tarde.")
+
+
+    @bot.command(name="estado")
+    @commands.guild_only()
+    async def comando_estado(ctx: commands.Context, draft_id: str = ""):
+        if not is_authorized(ctx.author.id):
+            await ctx.reply("No tienes autorización para consultar estados.")
+        return
+        if not re.fullmatch(r"[0-9a-f]{32}", draft_id or ""):
+            await ctx.reply("Uso: `!estado ID_DEL_BORRADOR`")
+        return
+
+        try:
+            draft = get_draft(draft_id)
+        except Exception:
+            log.exception("No se pudo consultar el estado.")
+            await ctx.reply("No se pudo consultar la base de datos.")
+            return
+            if not draft:
+                await ctx.reply("No se encontró el borrador.")
+            return
+
+        text = (
+            f"ID: `{draft['id']}`\n"
+            f"Estado: `{draft['status']}`\n"
+            f"Creado: `{draft['created_at']}`\n"
+            f"ID LinkedIn: `{draft['post_id'] or 'no disponible'}`"
+        )
+        if draft["error"]:
+            text += f"\nÚltimo error: {draft['error'][:500]}"
+            await ctx.reply(text)
+
+
+    @bot.command(name="resolver")
+    @commands.guild_only()
+    async def comando_resolver(
+        ctx: commands.Context,
+        draft_id: str = "",
+        resultado: str = "",
+        post_id: str = "",
+    ):
+        """
+Uso:
+!resolver ID publicado ID_LINKEDIN
+!resolver ID no_publicado
+
+Solo usar después de verificar manualmente el estado en LinkedIn.
+"""
+        if not is_authorized(ctx.author.id):
+            await ctx.reply("No tienes autorización para resolver publicaciones.")
+        return
+        if not re.fullmatch(r"[0-9a-f]{32}", draft_id or ""):
+            await ctx.reply(
+                "Uso: `!resolver ID publicado ID_LINKEDIN` o "
+                "`!resolver ID no_publicado`"
+            )
+        return
+
+        try:
+            draft = get_draft(draft_id)
+            if not draft:
+                await ctx.reply("No se encontró el borrador.")
+            return
+            if draft["status"] != "UNKNOWN":
+                await ctx.reply(
+                    f"Solo se pueden resolver borradores `UNKNOWN`. Estado actual: `{draft['status']}`."
+                )
+            return
+
+            if resultado == "publicado":
+                if not post_id.strip():
+                    await ctx.reply(
+                        "Incluye el ID de LinkedIn: `!resolver ID publicado ID_LINKEDIN`"
+                    )
+                return
+                change_status(draft_id, "PUBLISHED", post_id=post_id.strip(),
+                    error="Resuelto manualmente tras verificar LinkedIn.")
+                await ctx.reply("Estado actualizado a `PUBLISHED`.")
+            elif resultado == "no_publicado":
+                # Devuelve a PENDING solo por decisión explícita del operador.
+                with db() as conn:
+                    result = conn.execute("""
+UPDATE drafts
+SET status = 'PENDING',
+error = 'Operador confirmó manualmente que no se publicó',
+updated_at = CURRENT_TIMESTAMP
+WHERE id = ? AND status = 'UNKNOWN'
+""", (draft_id,))
+                    if result.rowcount != 1:
+                        await ctx.reply("No se pudo cambiar el estado; vuelve a consultarlo.")
+                    return
+                    await ctx.reply(
+                        "Estado actualizado a `PENDING`. Verifica de nuevo antes de aprobar."
+                    )
+            else:
+                await ctx.reply(
+                    "Resultado inválido. Usa `publicado` o `no_publicado`."
+                )
+        except Exception:
+            log.exception("No se pudo resolver el borrador.")
+            await ctx.reply("No se pudo actualizar el estado. Revisa los logs.")
+
+
+    @bot.event
+    async def on_ready():
+        log.info("Bot conectado como %s", bot.user)
+
+
+# =========================================================
+# 9. ARRANQUE
+# =========================================================
+
 if __name__ == "__main__":
-    Thread(target=run_flask, daemon=True).start()
-    bot.run(os.getenv("DISCORD_BOT_TOKEN"))
+    check_configuration()
+init_db()
+
+threading.Thread(
+    target=run_flask,
+    daemon=True,
+    name="flask-health",
+).start()
+
+try:
+    bot.run(env_required("DISCORD_BOT_TOKEN"), log_handler=None)
+finally:
+    executor.shutdown(wait=False, cancel_futures=True)
