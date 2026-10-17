@@ -62,9 +62,6 @@ class LinkedInBot(commands.Bot):
             raise
 
 
-bot = LinkedInBot(command_prefix="!", intents=intents)
-
-
 def env_required(name: str) -> str:
     value = os.getenv(name, "").strip()
     if not value:
@@ -654,7 +651,7 @@ async def approve(self, interaction: discord.Interaction):
     # =========================================================
     # 8. COMANDOS DISCORD
     # =========================================================
-
+    bot = LinkedInBot(command_prefix="!", intents=intents)
     @bot.command(name="post")
     @commands.guild_only()
     async def comando_post(ctx: commands.Context, *, idea: str = ""):
