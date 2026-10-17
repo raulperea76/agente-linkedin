@@ -749,7 +749,7 @@ def ejecutar_agentes(idea: str) -> str:
         async def comando_pendientes(ctx: commands.Context):
             if not is_authorized(ctx.author.id):
                 await ctx.reply("No tienes autorización para consultar borradores.")
-            return
+                return
 
             try:
                 drafts = list_drafts("PENDING", limit=15)
@@ -760,13 +760,13 @@ def ejecutar_agentes(idea: str) -> str:
 
             if not drafts:
                 await ctx.reply("No hay borradores pendientes.")
-            return
+                return
 
-        lines = ["**Borradores pendientes**"]
-        for draft in drafts:
-            short_text = draft["text"].replace("\n", " ")
-            if len(short_text) > 100:
-                short_text = short_text[:100] + "…"
+            lines = ["**Borradores pendientes**"]
+            for draft in drafts:
+                short_text = draft["text"].replace("\n", " ")
+                if len(short_text) > 100:
+                    short_text = short_text[:100] + "…"
                 lines.append(f"• `{draft['id']}` — {short_text}")
 
             lines.append("\nUsa `!recuperar ID` para volver a mostrar uno.")
@@ -778,10 +778,10 @@ def ejecutar_agentes(idea: str) -> str:
         async def comando_recuperar(ctx: commands.Context, draft_id: str = ""):
             if not is_authorized(ctx.author.id):
                 await ctx.reply("No tienes autorización para recuperar borradores.")
-            return
+                return
             if not re.fullmatch(r"[0-9a-f]{32}", draft_id or ""):
                 await ctx.reply("Uso: `!recuperar ID_DEL_BORRADOR`")
-            return
+                return
 
             try:
                 draft = get_draft(draft_id)
@@ -792,10 +792,10 @@ def ejecutar_agentes(idea: str) -> str:
 
             if not draft:
                 await ctx.reply("No se encontró el borrador.")
-            return
+                return
             if draft["status"] != "PENDING":
                 await ctx.reply(f"El borrador no está pendiente. Estado: `{draft['status']}`.")
-            return
+                return
 
             try:
                 await send_draft_preview(ctx, draft)
