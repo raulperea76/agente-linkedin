@@ -809,10 +809,10 @@ def ejecutar_agentes(idea: str) -> str:
         async def comando_estado(ctx: commands.Context, draft_id: str = ""):
             if not is_authorized(ctx.author.id):
                 await ctx.reply("No tienes autorización para consultar estados.")
-            return
+                return
             if not re.fullmatch(r"[0-9a-f]{32}", draft_id or ""):
                 await ctx.reply("Uso: `!estado ID_DEL_BORRADOR`")
-            return
+                return
 
             try:
                 draft = get_draft(draft_id)
@@ -823,16 +823,16 @@ def ejecutar_agentes(idea: str) -> str:
 
             if not draft:
                 await ctx.reply("No se encontró el borrador.")
-            return
+                return
 
-        text = (
-            f"ID: `{draft['id']}`\n"
-            f"Estado: `{draft['status']}`\n"
-            f"Creado: `{draft['created_at']}`\n"
-            f"ID LinkedIn: `{draft['post_id'] or 'no disponible'}`"
-        )
-        if draft["error"]:
-            text += f"\nÚltimo error: {draft['error'][:500]}"
+            text = (
+                f"ID: `{draft['id']}`\n"
+                f"Estado: `{draft['status']}`\n"
+                f"Creado: `{draft['created_at']}`\n"
+                f"ID LinkedIn: `{draft['post_id'] or 'no disponible'}`"
+            )
+            if draft["error"]:
+                text += f"\nÚltimo error: {draft['error'][:500]}"
             await ctx.reply(text)
 
 
@@ -846,30 +846,30 @@ def ejecutar_agentes(idea: str) -> str:
         ):
             if not is_authorized(ctx.author.id):
                 await ctx.reply("No tienes autorización para resolver publicaciones.")
-            return
+                return
             if not re.fullmatch(r"[0-9a-f]{32}", draft_id or ""):
                 await ctx.reply(
                     "Uso: `!resolver ID publicado ID_LINKEDIN` o `!resolver ID no_publicado`"
                 )
-            return
+                return
 
             try:
                 draft = get_draft(draft_id)
                 if not draft:
                     await ctx.reply("No se encontró el borrador.")
-                return
+                    return
                 if draft["status"] != "UNKNOWN":
                     await ctx.reply(
                         f"Solo se pueden resolver borradores `UNKNOWN`. Estado actual: `{draft['status']}`."
                     )
-                return
+                    return
 
                 if resultado == "publicado":
                     if not post_id.strip():
                         await ctx.reply(
                             "Incluye el ID de LinkedIn: `!resolver ID publicado ID_LINKEDIN`"
                         )
-                    return
+                        return
                     change_status(
                         draft_id,
                         "PUBLISHED",
