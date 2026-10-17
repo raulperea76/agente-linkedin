@@ -560,85 +560,42 @@ class ApprovalView(discord.ui.View):
         discard.callback = self.discard
         self.add_item(discard)
 
-    async def approve(self, interaction: discord.Interaction):
-        if not is_authorized(interaction.user.id):
-            await interaction.response.send_message(
-                "No tienes autorización para publicar.", ephemeral=True
-            )
+async def approve(self, interaction: discord.Interaction):
+    # 1. Validación previa y reclamación atómica del borrador
+    draft = get_draft(self.draft_id)
+    if not draft:
+        await interaction.followup.send("No se encontró el borrador.", ephemeral=True)
         return
 
-        await interaction.response.defer(ephemeral=True, thinking=True)
+    if not claim_draft(self.draft_id):
+        current = get_draft(self.draft_id)
+        state = current["status"] if current else "no disponible"
+        await interaction.followup.send(
+            f"El borrador ya fue procesado. Estado: {state}.",
+            ephemeral=True,
+        )
+    return
 
-        try:
-            draft = get_draft(self.draft_id)
-            if not draft:
-                await interaction.followup.send("No se encontró el borrador.", ephemeral=True)
-            return
-
-        if not claim_draft(self.draft_id):
-            current = get_draft(self.draft_id)
-            state = current["status"] if current else "no disponible"
-            await interaction.followup.send(
-                f"El borrador ya fue procesado. Estado: {state}.",
-                ephemeral=True,
-            )
-            return
-
+    # 2. Ejecución de la publicación
+    try:
         image = bytes(draft["image"]) if draft["image"] else None
         loop = asyncio.get_running_loop()
-        future = loop.run_in_executor(
+
+        post_id = await loop.run_in_executor(
             executor, publicar_en_linkedin, draft["text"], image
         )
 
-        try:
-            post_id = await asyncio.wait_for(asyncio.shield(future), timeout=90)
-        except asyncio.TimeoutError:
-            change_status(
-                self.draft_id,
-                "UNKNOWN",
-                error=(
-                "Timeout esperando confirmación. La operación pudo continuar "
-                "en segundo plano; verificar LinkedIn antes de reintentar."
-            ),
-            )
+        # Notificación de éxito o actualización de UI según tu lógica
         await interaction.followup.send(
-            "Se agotó el tiempo de espera. No vuelvas a publicarlo todavía: "
-            "verifica primero LinkedIn.",
-            ephemeral=True,
+            f"🚀 **¡Publicado exitosamente en LinkedIn!**\nID: `{post_id}`",
+            ephemeral=False
         )
-        return
 
-        change_status(self.draft_id, "PUBLISHED", post_id=post_id)
-        self.disable_all_items()
-        try:
-            if interaction.message:
-                await interaction.message.edit(view=self)
-        except discord.HTTPException:
-            log.warning("No se pudo actualizar el mensaje de aprobación.")
-
-            await interaction.followup.send(
-                f"Publicación confirmada. ID: `{post_id}`", ephemeral=True
-            )
-
-        except Exception:
-            log.exception("Error durante la aprobación/publicación.")
-        try:
-            current = get_draft(self.draft_id)
-            if current and current["status"] == "PUBLISHING":
-                change_status(
-                    self.draft_id,
-                    "UNKNOWN",
-                    error="Resultado incierto; revisar LinkedIn antes de reintentar.",
-                )
-        except Exception:
-            log.exception("No se pudo guardar el estado de error del borrador.")
-
-            await interaction.followup.send(
-                "No se pudo confirmar el resultado. Revisa LinkedIn y los logs "
-                "antes de intentar otra publicación.",
-                ephemeral=True,
-            )
-
+    except Exception as e:
+        await interaction.followup.send(
+            f"❌ Error al publicar en LinkedIn: `{str(e)}`",
+            ephemeral=True
+        )
     async def discard(self, interaction: discord.Interaction):
         if not is_authorized(interaction.user.id):
             await interaction.response.send_message(
