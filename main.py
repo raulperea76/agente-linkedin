@@ -1,13 +1,20 @@
 import os
 import io
+import sys
 import asyncio
 import requests
 import discord
 from discord.ext import commands
 from threading import Thread
+from concurrent.futures import ThreadPoolExecutor
 from flask import Flask
 
 from crewai import Agent, Task, Crew, Process
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_openai import ChatOpenAI
+
+# Executor para no bloquear el Event Loop de Discord
+executor = ThreadPoolExecutor(max_workers=4)
 
 # ---------------------------------------------------------
 # 1. Configurar Bot de Discord y Servidor Flask
@@ -27,17 +34,16 @@ def run_flask():
     app.run(host="0.0.0.0", port=port)
 
 # ---------------------------------------------------------
-# 2. Generador de Imagen con Timeout Rápido (8s)
+# 2. Generador de Imagen con Timeout Rápido
 # ---------------------------------------------------------
 def generar_imagen_ejecutiva(prompt_idea: str) -> bytes:
-    print(f"[INFO] Solicitando imagen para: {prompt_idea[:50]}...")
+    print(f"[LOG] Solicitando imagen para: {prompt_idea[:40]}...", flush=True)
     clean_prompt = requests.utils.quote(prompt_idea[:80])
     image_url = f"https://pollinations.ai/p/Minimalist%20modern%20executive%20illustration%20for%20LinkedIn%20about%20{clean_prompt}?width=1024&height=1024&seed=42"
 
-    # Timeout de 8 segundos para evitar bloqueos
-    response = requests.get(image_url, timeout=8)
+    response = requests.get(image_url, timeout=6)
     if response.status_code == 200:
-        print("[INFO] Imagen obtenida exitosamente.")
+        print("[LOG] Imagen obtenida exitosamente.", flush=True)
     return response.content
     raise Exception(f"HTTP {response.status_code}")
 
@@ -62,7 +68,7 @@ def registrar_y_subir_imagen_linkedin(image_bytes: bytes, token: str, author: st
 
     reg_res = requests.post(register_url, headers=headers, json=register_payload)
     if reg_res.status_code != 200:
-        print(f"[ERROR LinkedIn Register] {reg_res.text}")
+        print(f"[ERROR LinkedIn Register] {reg_res.text}", flush=True)
         return None
 
     reg_data = reg_res.json()["value"]
@@ -116,22 +122,32 @@ def publicar_en_linkedin(texto_post: str, image_bytes_list: list = None) -> bool
 
     res = requests.post(url, headers=headers, json=payload)
     if res.status_code != 201:
-        print(f"[ERROR LinkedIn Publish] {res.text}")
+        print(f"[ERROR LinkedIn Publish] {res.text}", flush=True)
     return res.status_code == 201
 
 # ---------------------------------------------------------
-# 4. Flujo Multiagente CrewAI
+# 4. Flujo Multiagente CrewAI (Con clientes explícitos)
 # ---------------------------------------------------------
 def ejecutar_orquestacion_agentes(idea_usuario: str) -> str:
-    print("[INFO] Iniciando CrewAI con Gemini y GPT-4o...")
-    llm_gemini_name = "gemini/gemini-1.5-pro"
-    llm_gpt_name = "gpt-4o"
+    print("[LOG] Inicializando modelos LangChain...", flush=True)
+
+    llm_gemini = ChatGoogleGenerativeAI(
+        model="gemini-1.5-pro",
+        google_api_key=os.getenv("GEMINI_API_KEY")
+    )
+
+    llm_gpt = ChatOpenAI(
+        model="gpt-4o",
+        openai_api_key=os.getenv("OPENAI_API_KEY")
+    )
+
+    print("[LOG] Creando agentes de CrewAI...", flush=True)
 
     redactor = Agent(
         role='Redactor Ejecutivo de TI',
         goal='Crear borradores para LinkedIn basados en la experiencia del usuario.',
         backstory='Eres un líder de TI experimentado. Escribes con autoridad, de forma directa y enfocada en valor de negocio.',
-        llm=llm_gemini_name,
+        llm=llm_gemini,
         verbose=True
     )
 
@@ -139,7 +155,7 @@ def ejecutar_orquestacion_agentes(idea_usuario: str) -> str:
         role='Auditor Crítico Anti-IA',
         goal='Detectar y eliminar muletillas robóticas, frases hechas y clichés corporativos.',
         backstory='Aborreces los textos genéricos de IA. Exiges ganchos fuertes, oraciones cortas y tono 100% humano.',
-        llm=llm_gpt_name,
+        llm=llm_gpt,
         verbose=True
     )
 
@@ -147,7 +163,7 @@ def ejecutar_orquestacion_agentes(idea_usuario: str) -> str:
         role='Editor Final de Estilo',
         goal='Integrar las críticas y entregar la versión definitiva del post.',
         backstory='Especialista en pulir el mensaje conservando la autenticidad del autor.',
-        llm=llm_gemini_name,
+        llm=llm_gemini,
         verbose=True
     )
 
@@ -175,8 +191,9 @@ def ejecutar_orquestacion_agentes(idea_usuario: str) -> str:
         process=Process.sequential
     )
 
+    print("[LOG] Ejecutando CrewAI kickoff...", flush=True)
     resultado = crew.kickoff()
-    print("[INFO] Orquestación finalizada exitosamente.")
+    print("[LOG] CrewAI finalizado con éxito.", flush=True)
     return str(getattr(resultado, 'raw', resultado))
 
 # ---------------------------------------------------------
@@ -192,11 +209,11 @@ class ComponentesAprobacion(discord.ui.View):
     async def publicar(self, interaction: discord.Interaction, button: discord.ui.Button):
         await interaction.response.defer()
         loop = asyncio.get_event_loop()
-        exito = await loop.run_in_executor(None, publicar_en_linkedin, self.texto_post, self.image_bytes_list)
+        exito = await loop.run_in_executor(executor, publicar_en_linkedin, self.texto_post, self.image_bytes_list)
         if exito:
             await interaction.followup.send("✅ **¡Publicado con éxito en LinkedIn con la imagen!**")
         else:
-            await interaction.followup.send("❌ **Error al publicar en LinkedIn.** Revisa los logs de Render para ver la razón exacta.")
+            await interaction.followup.send("❌ **Error al publicar en LinkedIn.** Revisa tus credenciales.")
 
     @discord.ui.button(label="Descartar", style=discord.ButtonStyle.red, emoji="🗑️")
     async def descartar(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -224,16 +241,16 @@ class ComponentesAprobacion(discord.ui.View):
                     await ctx.send("🎨 *No adjuntaste imagen. Generando ilustración profesional...*")
                 try:
                     loop = asyncio.get_event_loop()
-                    img_bytes = await loop.run_in_executor(None, generar_imagen_ejecutiva, idea)
+                    img_bytes = await loop.run_in_executor(executor, generar_imagen_ejecutiva, idea)
                     images_to_upload.append(img_bytes)
                 except Exception as e:
-                    print(f"[WARN] Error/Timeout generando imagen: {e}")
+                    print(f"[WARN] Error/Timeout generando imagen: {e}", flush=True)
                     await ctx.send("⚠️ *La generación de imagen tardó demasiado. Se procesará solo texto.*")
 
-                # C) Ejecutar CrewAI
+                # C) Ejecutar CrewAI en hilo aislado
                 try:
                     loop = asyncio.get_event_loop()
-                    post_final = await loop.run_in_executor(None, ejecutar_orquestacion_agentes, idea)
+                    post_final = await loop.run_in_executor(executor, ejecutar_orquestacion_agentes, idea)
 
                     vista = ComponentesAprobacion(texto_post=post_final, image_bytes_list=images_to_upload)
 
@@ -244,7 +261,7 @@ class ComponentesAprobacion(discord.ui.View):
                         await ctx.send(f"📝 **Propuesta de Post Final:**\n\n{post_final}", view=vista)
 
                 except Exception as err:
-                    print(f"[ERROR CrewAI] {err}")
+                    print(f"[ERROR CrewAI] {err}", flush=True)
                     await ctx.send(f"❌ **Error durante la orquestación de IA:** `{err}`")
 
 # ---------------------------------------------------------
