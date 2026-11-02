@@ -910,12 +910,19 @@ if __name__ == "__main__":
     check_configuration()
     init_db()
 
-    threading.Thread(
+    #1. Iniciamos flask primero en su propio hilo de fondo
+    flask_thread = threading.Thread(
         target=run_flask,
         daemon=True,
-        name="flask-health",
-    ).start()
+        name="flask-healt"
+    )
+    flask_thread.start()
 
+    # Damos un segundo de respiro para que Flask asegure la apertura del puerto Render
+    import time
+    time.sleep(1)
+
+    # 2. Arrancamos el bot Discord en el hilo principal
     try:
         bot.run(env_required("DISCORD_BOT_TOKEN"), log_handler=None)
     finally:
