@@ -908,15 +908,15 @@ WHERE id = ? AND status = 'UNKNOWN'
 
 if __name__ == "__main__":
     check_configuration()
-init_db()
+    init_db()
 
-threading.Thread(
-    target=run_flask,
-    daemon=True,
-    name="flask-health",
-).start()
+    threading.Thread(
+        target=run_flask,
+        daemon=True,
+        name="flask-health",
+    ).start()
 
-try:
-    bot.run(env_required("DISCORD_BOT_TOKEN"), log_handler=None)
-finally:
-    executor.shutdown(wait=False, cancel_futures=True)
+    try:
+        bot.run(env_required("DISCORD_BOT_TOKEN"), log_handler=None)
+    finally:
+        executor.shutdown(wait=False, cancel_futures=True)
