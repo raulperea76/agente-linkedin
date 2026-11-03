@@ -439,10 +439,8 @@ def publicar_en_linkedin(texto: str, image_bytes: bytes | None = None) -> str:
     )
     if response.status_code != 201:
         raise RuntimeError(
-            f"LinkedIn no confirmó la publicación (HTTP {response.status_code}). "
-            "Verifica el estado en LinkedIn antes de reintentar."
+            f"LinkedIn no confirmó la publicación (HTTP {response.status_code}): {response.text}"
         )
-
     post_id = response.headers.get("x-restli-id")
     if not post_id:
         raise RuntimeError(
