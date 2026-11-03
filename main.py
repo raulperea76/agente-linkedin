@@ -41,7 +41,7 @@ CREW_TIMEOUT = 120
 HTTP_TIMEOUT = (5, 30)
 
 LINKEDIN_POSTS_URL = "https://api.linkedin.com/rest/posts"
-LINKEDIN_IMAGES_URL = "https://api.linkedin.com/rest/images?action=initializeUpload"
+LINKEDIN_IMAGES_URL = "https://api.linkedin.com/v2/assets?action=initializeUpload"
 
 executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="linkedin-worker")
 app = Flask(__name__)
@@ -345,32 +345,51 @@ def subir_imagen_linkedin(image_bytes: bytes) -> str:
     author = env_required("LINKEDIN_PERSON_URN")
     image_bytes = validate_image(image_bytes)
 
-    response = requests.post(
+    # Estructura requerida por registerUpload para imagenes en el feed
+    body = {
+        "registerUploadRequest": {
+            "recipes": ["urn:li:digitalmediaRecipe:feedshare-image"],
+            "owner": author,
+            "serviceRelationships": [
+                {
+                    "relationshipType": "OWNER",
+                    "identifier": "urn:li:userGeneratedContent"
+                }
+            ]
+        }
+    }
+    response = request.post(
         LINKEDIN_IMAGES_URL,
         headers=linkedin_headers(),
-        json={"initializeUploadRequest": {"owner": author}},
+        json=body,
         timeout=HTTP_TIMEOUT,
     )
     if not response.ok:
         raise RuntimeError(
-            f"LinkedIn no pudo inicializar la imagen (HTTP {response.status_code})."
+            f"LinkedIn no pudo inicializar la imagen (HTTP {response.status.code}): {response.text}"
         )
 
     try:
-        value = response.json()["value"]
-        upload_url = value["uploadUrl"]
-        image_urn = value["image"]
-    except (ValueError, KeyError, TypeError) as exc:
-        raise RuntimeError("Respuesta inesperada al inicializar la imagen.") from exc
+        data = response.json()
+        value = data["value"]
 
+        # Extraemos la URL donde debemos subir los bytes y el URN del asset resultante
+        upload_mechanism = value["uploadMechanism"]["com.linkedin.digitalmedia.uploading.MediaUploadHttpRequest"]
+        upload_url = uploadmechanism["uploadUrl"]
+        image_urn = value["asset"]
+    except (ValueError, KeyError, TypeError) as exc:
+        raise RuntimeError("Respuesta inesperada al inicializar la imagen en LinkedIn.") from exc
+
+    # Validación de seguridad de la URL proporcionada
     parsed = urlparse(upload_url)
     if parsed.scheme != "https" or not (
         parsed.hostname == "linkedin.com"
         or (parsed.hostname and parsed.hostname.endswith(".linkedin.com"))
     ):
-        raise RuntimeError("LinkedIn devolvió una URL de carga no permitida.")
+        raise RuntimeError("Linkedin devolvió una URL de carga no permitida.")
 
-    upload = requests.put(
+    # Subida de los bytes binarios de la imagen mediante PUT
+    upload = request.put(
         upload_url,
         headers={"Content-Type": "application/octet-stream"},
         data=image_bytes,
@@ -379,10 +398,9 @@ def subir_imagen_linkedin(image_bytes: bytes) -> str:
     )
     if upload.status_code not in (200, 201, 204):
         raise RuntimeError(
-            f"LinkedIn rechazó la carga de la imagen (HTTP {upload.status_code})."
+            f"Linkedin rechazó la carga de la imagen (HTTP {upload.status_code})."
         )
-    return image_urn
-
+    return imagen_urn                    
 
 def publicar_en_linkedin(texto: str, image_bytes: bytes | None = None) -> str:
     texto = texto.strip()
