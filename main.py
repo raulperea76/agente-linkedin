@@ -444,7 +444,7 @@ def publicar_en_linkedin(texto: str, image_bytes: bytes | None = None) -> str:
     # 3. CABECERAS ESTRICTAS (Obligatorias para /rest/posts)
     headers = {
         "Authorization": f"Bearer {token}",
-        "LinkedIn-Version": "202401",
+        "LinkedIn-Version": "202610",
         "X-Restli-Protocol-Version": "2.0.0",
         "Content-Type": "application/json"
     }
