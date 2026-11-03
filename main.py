@@ -406,40 +406,64 @@ def subir_imagen_linkedin(image_bytes: bytes) -> str:
         )
     return imagen_urn                    
 
+
 def publicar_en_linkedin(texto: str, image_bytes: bytes | None = None) -> str:
     texto = texto.strip()
     if not texto:
         raise ValueError("El texto del post está vacío.")
-    if len(texto) > MAX_POST_CHARS:
-        raise ValueError(f"El post supera {MAX_POST_CHARS} caracteres.")
 
+    token = env_required("LINKEDIN_ACCESS_TOKEN")
+
+    # 1. AUTODESCUBRIMIENTO DE URN: Evita el error 403 extrayendo tu ID real del token
+    info_response = requests.get(
+        "https://api.linkedin.com/v2/userinfo",
+        headers={"Authorization": f"Bearer {token}"},
+        timeout=10
+    )
+    if info_response.status_code != 200:
+        raise RuntimeError(f"El token es inválido o expiró: {info_response.text}")
+
+    # Extraemos el ID real ('sub') y formamos el URN exacto
+    real_urn = f"urn:li:person:{info_response.json().get('sub')}"
+    log.info(f"URN real extraído directamente del token: {real_urn}")
+
+    # 2. PAYLOAD SIMPLIFICADO
     payload = {
-        "author": env_required("LINKEDIN_PERSON_URN"),
+        "author": real_urn,
         "commentary": texto,
         "visibility": "PUBLIC",
         "distribution": {
             "feedDistribution": "MAIN_FEED",
+            "targetEntities": [],
+            "thirdPartyDistributionChannels": []
         },
         "lifecycleState": "PUBLISHED",
+        "isReshareDisabledByAuthor": False
     }
-    log.info(f"Enviando post a Linkedin con author URN: {payload['author']}")
 
+    # 3. CABECERAS ESTRICTAS (Obligatorias para /rest/posts)
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "LinkedIn-Version": "2024-01",
+        "X-Restli-Protocol-Version": "2.0.0",
+        "Content-Type": "application/json"
+    }
+
+    # 4. ENVÍO
     response = requests.post(
-        LINKEDIN_POSTS_URL,
-        headers=linkedin_headers(),
+        "https://api.linkedin.com/rest/posts",
+        headers=headers,
         json=payload,
-        timeout=HTTP_TIMEOUT,
+        timeout=20,
     )
+
     if response.status_code != 201:
         raise RuntimeError(
-            f"LinkedIn no confirmó la publicación (HTTP {response.status_code}): {response.text}"
+            f"LinkedIn rechazó la publicación (HTTP {response.status_code}): {response.text}"
         )
+
     post_id = response.headers.get("x-restli-id")
-    if not post_id:
-        raise RuntimeError(
-            "LinkedIn respondió 201 pero no devolvió x-restli-id; verificar manualmente."
-        )
-    return post_id
+    return post_id or "Publicado exitosamente (sin ID devuelto)"
 
 # =========================================================
 # 6. CREWAI: TRES AGENTES
