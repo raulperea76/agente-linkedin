@@ -427,13 +427,16 @@ def publicar_en_linkedin(texto: str, image_bytes: bytes | None = None) -> str:
     }
 
     if image_bytes:
-        image_urn = subir_imagen_linkedin(image_bytes)
-        payload["content"] = {
-            "media": {
-                "id": image_urn,
-                "altText": "Ilustración para la publicación",
+        try:
+            image_urn = subir_imagen_linkedin(image_bytes)
+            payload["content"] = {
+                "media": {
+                    "id": image_urn,
+                    "altText": "Ilustración para la publicación",
+                }
             }
-        }
+        except Exception as img_err:
+            log.warning(f"No se pudo adjuntar la imagen a LinkedIn (se publicará solo texto): {img_err}")
 
     response = requests.post(
         LINKEDIN_POSTS_URL,
