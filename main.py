@@ -6,6 +6,7 @@ import re
 import sqlite3
 import threading
 import uuid
+import random
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from urllib.parse import urlparse
@@ -314,7 +315,12 @@ def generar_imagen(idea: str) -> bytes:
     response = requests.get(
         "https://image.pollinations.ai/prompt/"
         + requests.utils.quote(prompt, safe=""),
-        params={"width": 1024, "height": 1024, "seed": 42, "nologo": "true"},
+        params={
+            "width": 1024, 
+            "height": 1024, 
+            "seed": random.randint(1,1000000),
+            "nologo": "true"
+        },
         timeout=(5, 20),
     )
     response.raise_for_status()
