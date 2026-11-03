@@ -308,9 +308,10 @@ def validate_image(data: bytes) -> bytes:
 
 def generar_imagen(idea: str) -> bytes:
     prompt = (
-        "Minimalist, sophisticated editorial illustration for LinkedIn. "
-        "Professional executive theme, clean composition, no text, no logos. "
-        + idea[:500]
+        "Profesional technology executive illustration, modern corporate workspace, "
+        "subtle digital infrastructure, data nodes, minimalist vector design, "
+        "high-end tech aesthethic, no text, no distorted shapes, clean composition. "
+        + idea[:300]
     )
     response = requests.get(
         "https://image.pollinations.ai/prompt/"
