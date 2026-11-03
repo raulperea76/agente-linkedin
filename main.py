@@ -1,7 +1,11 @@
+# =========================================================
+# 0. SECCIÓN DE IMPORTS
+# =========================================================
 import asyncio
 import io
 import logging
 import os
+import logging
 import re
 import sqlite3
 import threading
@@ -17,7 +21,7 @@ from discord.ext import commands
 from flask import Flask, jsonify
 from PIL import Image, UnidentifiedImageError
 from crewai import Agent, Task, Crew, Process, LLM
-
+from threading import Thread
 
 # =========================================================
 # 1. CONFIGURACIÓN
