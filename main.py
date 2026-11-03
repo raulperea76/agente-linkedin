@@ -322,7 +322,7 @@ def generar_imagen(idea: str) -> bytes:
             "seed": random.randint(1,1000000),
             "nologo": "true"
         },
-        timeout=(5, 20),
+        timeout=(5, 45),
     )
     response.raise_for_status()
     return validate_image(response.content)
