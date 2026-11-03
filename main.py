@@ -306,26 +306,30 @@ def validate_image(data: bytes) -> bytes:
         raise ValueError("La imagen excede los límites de seguridad.") from exc
 
 
-def generar_imagen(idea: str) -> bytes:
+def generar_imagen(idea: str) -> bytes | None:
     prompt = (
         "Profesional technology executive illustration, modern corporate workspace, "
         "subtle digital infrastructure, data nodes, minimalist vector design, "
         "high-end tech aesthethic, no text, no distorted shapes, clean composition. "
         + idea[:300]
     )
-    response = requests.get(
-        "https://image.pollinations.ai/prompt/"
-        + requests.utils.quote(prompt, safe=""),
-        params={
-            "width": 1024, 
-            "height": 1024, 
-            "seed": random.randint(1,1000000),
-            "nologo": "true"
-        },
-        timeout=(5, 45),
-    )
-    response.raise_for_status()
-    return validate_image(response.content)
+    try:
+        response = requests.get(
+            "https://image.pollinations.ai/prompt/"
+            + requests.utils.quote(prompt, safe=""),
+            params={
+                "width": 1024, 
+                "height": 1024, 
+                "seed": random.randint(1,1000000),
+                "nologo": "true"
+            },
+            timeout=(5, 45),
+        )
+        response.raise_for_status()
+        return validate_image(response.content)
+    except Exception:
+        log.warning("Pollinations AI no respondio a tiempo; continuando sin imagen.")
+        return None
 
 
 # =========================================================
