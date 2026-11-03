@@ -358,7 +358,7 @@ def subir_imagen_linkedin(image_bytes: bytes) -> str:
             ]
         }
     }
-    response = request.post(
+    response = requests.post(
         LINKEDIN_IMAGES_URL,
         headers=linkedin_headers(),
         json=body,
