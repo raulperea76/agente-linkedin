@@ -419,24 +419,10 @@ def publicar_en_linkedin(texto: str, image_bytes: bytes | None = None) -> str:
         "visibility": "PUBLIC",
         "distribution": {
             "feedDistribution": "MAIN_FEED",
-            "targetEntities": [],
-            "thirdPartyDistributionChannels": [],
         },
         "lifecycleState": "PUBLISHED",
-        "isReshareDisabledByAuthor": False,
     }
     log.info(f"Enviando post a Linkedin con author URN: {payload['author']}")
-    if image_bytes:
-        try:
-            image_urn = subir_imagen_linkedin(image_bytes)
-            payload["content"] = {
-                "media": {
-                    "id": image_urn,
-                    "altText": "Ilustración para la publicación",
-                }
-            }
-        except Exception as img_err:
-            log.warning(f"No se pudo adjuntar la imagen a LinkedIn (se publicará solo texto): {img_err}")
 
     response = requests.post(
         LINKEDIN_POSTS_URL,
@@ -454,7 +440,6 @@ def publicar_en_linkedin(texto: str, image_bytes: bytes | None = None) -> str:
             "LinkedIn respondió 201 pero no devolvió x-restli-id; verificar manualmente."
         )
     return post_id
-
 
 # =========================================================
 # 6. CREWAI: TRES AGENTES
