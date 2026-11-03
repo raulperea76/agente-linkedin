@@ -410,7 +410,21 @@ def subir_imagen_linkedin(image_bytes: bytes) -> str:
         )
     return imagen_urn                    
 
+app = Flask('')
 
+@app.route('/')
+def home():
+    return "Bot activo y listo 24/7"
+
+def run_web_server():
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host='0.0.0.0', port=port)
+
+def keep_alive():
+    t = Thread(target=run_web_server)
+    t.daemon = True
+    t.start()
+    
 def publicar_en_linkedin(texto: str, image_bytes: bytes | None = None) -> str:
     texto = texto.strip()
     if not texto:
