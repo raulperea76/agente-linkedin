@@ -425,7 +425,7 @@ def publicar_en_linkedin(texto: str, image_bytes: bytes | None = None) -> str:
         "lifecycleState": "PUBLISHED",
         "isReshareDisabledByAuthor": False,
     }
-
+    log.info(f"Enviando post a Linkedin con author URN: {payload['autor']}")
     if image_bytes:
         try:
             image_urn = subir_imagen_linkedin(image_bytes)
