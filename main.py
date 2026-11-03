@@ -366,7 +366,7 @@ def subir_imagen_linkedin(image_bytes: bytes) -> str:
     )
     if not response.ok:
         raise RuntimeError(
-            f"LinkedIn no pudo inicializar la imagen (HTTP {response.status.code}): {response.text}"
+            f"LinkedIn no pudo inicializar la imagen (HTTP {response.status_code}): {response.text}"
         )
 
     try:
