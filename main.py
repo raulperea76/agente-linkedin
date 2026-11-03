@@ -389,7 +389,7 @@ def subir_imagen_linkedin(image_bytes: bytes) -> str:
         raise RuntimeError("Linkedin devolvió una URL de carga no permitida.")
 
     # Subida de los bytes binarios de la imagen mediante PUT
-    upload = request.put(
+    upload = requests.put(
         upload_url,
         headers={"Content-Type": "application/octet-stream"},
         data=image_bytes,
